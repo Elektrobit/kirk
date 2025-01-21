@@ -1,4 +1,5 @@
 import os
+from libkirk.sut import IOBuffer
 # from typing import override (Not working for SDK [Python 3.10 < 3.12])
 from libkirk.qemu import QemuSUT
 from logging import getLogger
@@ -20,7 +21,8 @@ class EbclQemuSUT(QemuSUT):
         self._format = kwargs.get("format", "raw")
         self._kernel_append = kwargs.get("kernel_append", "")
     
-#    @override
+#   @override
+#   Reason: Fit the QEMU commands better to our needs and enable arguments for kernel_append
     @property
     def config_help(self) -> dict:
         return {
@@ -40,7 +42,8 @@ class EbclQemuSUT(QemuSUT):
             "options": "user defined options",
         }
     
-#    @override
+#   @override
+#   Reason: Fit the QEMU commands better to our needs and enable arguments for kernel_append
     def _get_command(self) -> str:
         """
         Return the full qemu command to execute.
@@ -98,7 +101,20 @@ class EbclQemuSUT(QemuSUT):
 
         return cmd
 
-#    @override
+#   @override
+#   Reason: Avoid duplicate Naming
     @property
     def name(self) -> str:
         return "ebclqemu"
+
+#   @override 
+#   Reason: SDK Setup inserts copy/paste support ANSI characters, remove them from super's return set
+    async def _exec(self, command: str, iobuffer: IOBuffer) -> set:
+        """
+        Execute a command and return set(stdout, retcode, exec_time) without ANSI escape sequences.
+        """ 
+        stdout, retcode, exec_time = await super()._exec(command, iobuffer)
+        # Strip ANSI escape sequences from the stdout
+        stdout = stdout.replace("\n\x1b[?2004h\x1b[?2004l\r", "")
+
+        return stdout, retcode, exec_time
