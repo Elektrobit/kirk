@@ -115,6 +115,7 @@ class EbclQemuSUT(QemuSUT):
         """ 
         stdout, retcode, exec_time = await super()._exec(command, iobuffer)
         # Strip ANSI escape sequences from the stdout
-        stdout = stdout.replace("\n\x1b[?2004h\x1b[?2004l\r", "")
+        if stdout is not None:
+            stdout = stdout.replace("\n\x1b[?2004h\x1b[?2004l\r", "")
 
         return stdout, retcode, exec_time
