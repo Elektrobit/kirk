@@ -1,12 +1,24 @@
+"""
+.. module:: ebclqemu
+    :platform: Linux
+    :synopsis: module containing qemu SUT implementation
+
+.. moduleauthor:: Andre Barthel <andre.barthel@elektrobit.com>
+"""
 import os
+from logging import getLogger
 from libkirk.sut import IOBuffer
 # from typing import override (Not working for SDK [Python 3.10 < 3.12])
 from libkirk.qemu import QemuSUT
 from libkirk.sut import SUTError
-from logging import getLogger
 
 class EbclQemuSUT(QemuSUT):
-    
+    """
+    EbclQemu SUT spawn a new VM using qemu and execute commands inside it.
+    This SUT implementation can be used to run commands inside
+    a protected, virtualized environment. Implements further QEMU
+    customization.
+    """
     def __init__(self):
         super().__init__()
         self._logger = getLogger("kirk.ebclqemu")
@@ -15,7 +27,7 @@ class EbclQemuSUT(QemuSUT):
         self._machine = None
         self._system = None
         self._cpu = None
-    
+
     def setup(self, **kwargs):
         super().setup(**kwargs)
         self._user = kwargs.get("user", "root")
@@ -26,12 +38,13 @@ class EbclQemuSUT(QemuSUT):
         self._machine = kwargs.get("machine", "")
         self._system = kwargs.get("system", "")
         self._cpu = kwargs.get("cpu", "")
-        
+
         if self._system == "aarch64":
             if not self._cpu or not self._machine:
                 raise SUTError(
-                    f"For aarch64 machine (\"{self._machine}\") and cpu (\"{self._cpu}\") parameters must be set!")
-    
+                    f"For aarch64 machine (\"{self._machine}\") \
+                    and cpu (\"{self._cpu}\") parameters must be set!")
+
 #   @override
 #   Reason: Fit the QEMU commands better to our needs and enable arguments for kernel_append
     @property
@@ -54,7 +67,7 @@ class EbclQemuSUT(QemuSUT):
             "format": "Image format (default: 'raw')",
             "options": "user defined options",
         }
-    
+
 #   @override
 #   Reason: Fit the QEMU commands better to our needs and enable arguments for kernel_append
     def _get_command(self) -> str:
@@ -95,7 +108,7 @@ class EbclQemuSUT(QemuSUT):
 
         if  self._system == "aarch64" and self._cpu and self._machine:
             params.append(f"-machine {self._machine} -cpu {self._cpu}")
-            
+
         if self._image:
             params.append(f"-drive if=virtio,cache=unsafe,file={self._image},format={self._format}")
 
@@ -123,12 +136,13 @@ class EbclQemuSUT(QemuSUT):
     def name(self) -> str:
         return "ebclqemu"
 
-#   @override 
-#   Reason: SDK Setup inserts copy/paste support ANSI characters, remove them from super's return set
+#   @override
+#   Reason: SDK Setup inserts copy/paste support ANSI characters,
+#   remove them from super's return set
     async def _exec(self, command: str, iobuffer: IOBuffer) -> set:
         """
         Execute a command and return set(stdout, retcode, exec_time) without ANSI escape sequences.
-        """ 
+        """
         stdout, retcode, exec_time = await super()._exec(command, iobuffer)
         # Strip ANSI escape sequences from the stdout
         if stdout is not None:
