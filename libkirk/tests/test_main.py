@@ -4,7 +4,6 @@ Unittests for main module.
 import os
 import sys
 import pwd
-import time
 import json
 import pytest
 import libkirk.main
@@ -22,7 +21,7 @@ class TestMain:
         """
         libkirk.main.LOADED_FRAMEWORK.append(dummy_framework)
 
-    def read_report(self, temp, tests_num) -> dict:
+    def read_report(self, temp) -> dict:
         """
         Check if report file contains the given number of tests.
         """
@@ -32,10 +31,8 @@ class TestMain:
 
         # read report and check if all suite's tests have been executed
         report_d = None
-        with open(report, 'r') as report_f:
+        with open(report, 'r', encoding="utf-8") as report_f:
             report_d = json.loads(report_f.read())
-
-        assert len(report_d["results"]) == tests_num
 
         return report_d
 
@@ -67,7 +64,7 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-    @pytest.mark.skipif(sys.version_info < (3,8), reason="requires python3.8+")
+    @pytest.mark.skipif(sys.version_info < (3, 8), reason="requires python3.8+")
     def test_run_command_timeout(self, tmpdir):
         """
         Test --run-command option with timeout.
@@ -100,7 +97,8 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 2)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 2
 
     def test_run_suite_timeout(self, tmpdir):
         """
@@ -119,8 +117,10 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        report_d = self.read_report(temp, 2)
-        for param in report_d["results"]:
+        report = self.read_report(temp)
+        assert len(report["results"]) == 2
+
+        for param in report["results"]:
             assert param["test"]["passed"] == 0
             assert param["test"]["failed"] == 0
             assert param["test"]["broken"] == 0
@@ -186,7 +186,8 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 2)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 2
 
         # restore session
         name = pwd.getpwuid(os.getuid()).pw_name
@@ -202,7 +203,8 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 1)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 1
 
     def test_json_report(self, tmpdir):
         """
@@ -223,9 +225,11 @@ class TestMain:
         assert excinfo.value.code == libkirk.main.RC_OK
         assert os.path.isfile(report)
 
-        report_a = self.read_report(temp, 2)
+        report_a = self.read_report(temp)
+        assert len(report_a["results"]) == 2
+
         report_b = None
-        with open(report, 'r') as report_f:
+        with open(report, 'r', encoding="utf-8") as report_f:
             report_b = json.loads(report_f.read())
 
         assert report_a == report_b
@@ -239,7 +243,7 @@ class TestMain:
             "--tmp-dir", str(temp),
             "--framework", "dummy",
             "--run-suite", "suite01",
-            "--skip-tests", "test0[12]"
+            "--skip-tests", "test0[23]"
         ]
 
         with pytest.raises(SystemExit) as excinfo:
@@ -247,14 +251,15 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 0)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 1
 
     def test_skip_file(self, tmpdir):
         """
         Test --skip-file option.
         """
         skipfile = tmpdir / "skipfile"
-        skipfile.write("test01\ntest02")
+        skipfile.write("test02\ntest03")
 
         temp = tmpdir.mkdir("temp")
         cmd_args = [
@@ -269,14 +274,15 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 0)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 1
 
     def test_skip_tests_and_file(self, tmpdir):
         """
         Test --skip-file option with --skip-tests.
         """
         skipfile = tmpdir / "skipfile"
-        skipfile.write("test02")
+        skipfile.write("test03")
 
         temp = tmpdir.mkdir("temp")
         cmd_args = [
@@ -292,7 +298,8 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        self.read_report(temp, 0)
+        report = self.read_report(temp)
+        assert len(report["results"]) == 1
 
     def test_workers(self, tmpdir):
         """
@@ -312,7 +319,9 @@ class TestMain:
             libkirk.main.run(cmd_args=cmd_args)
 
         assert excinfo.value.code == libkirk.main.RC_OK
-        self.read_report(temp, 2)
+
+        report = self.read_report(temp)
+        assert len(report["results"]) == 2
 
     def test_sut_help(self):
         """
@@ -360,5 +369,75 @@ class TestMain:
 
         assert excinfo.value.code == libkirk.main.RC_OK
 
-        report_d = self.read_report(temp, 1)
-        assert report_d["results"][0]["test"]["log"] == "ciao"
+        report = self.read_report(temp)
+        assert len(report["results"]) == 1
+        assert report["results"][0]["test"]["log"] == "ciao"
+
+    def test_suite_iterate(self, tmpdir):
+        """
+        Test --suite-iterate option.
+        """
+        temp = tmpdir.mkdir("temp")
+        cmd_args = [
+            "--tmp-dir", str(temp),
+            "--framework", "dummy",
+            "--run-suite", "suite01",
+            "--suite-iterate", "4",
+        ]
+
+        with pytest.raises(SystemExit) as excinfo:
+            libkirk.main.run(cmd_args=cmd_args)
+
+        assert excinfo.value.code == libkirk.main.RC_OK
+
+        report = self.read_report(temp)
+        assert len(report["results"]) == 8
+
+    def test_randomize(self, tmpdir):
+        """
+        Test --randomize option.
+        """
+        num_of_suites = 10
+
+        temp = tmpdir.mkdir("temp")
+        cmd_args = [
+            "--tmp-dir", str(temp),
+            "--framework", "dummy",
+            "--run-suite",
+        ]
+        cmd_args.extend(["suite01"] * num_of_suites)
+        cmd_args.append("--randomize")
+
+        with pytest.raises(SystemExit) as excinfo:
+            libkirk.main.run(cmd_args=cmd_args)
+
+        assert excinfo.value.code == libkirk.main.RC_OK
+
+        report = self.read_report(temp)
+        assert len(report["results"]) == 2 * num_of_suites
+
+        tests_names = []
+        for test in report["results"]:
+            tests_names.append(test["test_fqn"])
+
+        assert ["test01", "test02"] * num_of_suites != tests_names
+
+    def test_runtime(self, tmpdir):
+        """
+        Test --runtime option.
+        """
+        temp = tmpdir.mkdir("temp")
+        cmd_args = [
+            "--tmp-dir", str(temp),
+            "--framework", "dummy",
+            "--run-suite", "suite01",
+            "--runtime", "1",
+        ]
+
+        with pytest.raises(SystemExit) as excinfo:
+            libkirk.main.run(cmd_args=cmd_args)
+
+        assert excinfo.value.code == libkirk.main.RC_OK
+
+        report = self.read_report(temp)
+        assert len(report["results"]) >= 2

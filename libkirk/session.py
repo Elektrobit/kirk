@@ -6,12 +6,16 @@
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
 import os
+import re
+import copy
+import random
 import logging
 import asyncio
 import libkirk
 import libkirk.data
 import libkirk.events
 from libkirk import KirkException
+from libkirk.io import AsyncFile
 from libkirk.sut import SUT
 from libkirk.sut import IOBuffer
 from libkirk.results import TestResults
@@ -56,8 +60,6 @@ class Session:
         :type workers: int
         :param force_parallel: Force parallel execution of all tests
         :type force_parallel: bool
-        :param skip_tests: regexp that exclude tests from execution
-        :type skip_tests: str
         """
         self._logger = logging.getLogger("kirk.session")
         self._tmpdir = kwargs.get("tmpdir", None)
@@ -67,6 +69,7 @@ class Session:
         self._stop = False
         self._exec_lock = asyncio.Lock()
         self._run_lock = asyncio.Lock()
+        self._results = []
 
         if not self._tmpdir:
             raise ValueError("tmpdir is empty")
@@ -80,7 +83,6 @@ class Session:
         suite_timeout = kwargs.get("suite_timeout", 3600.0)
         workers = kwargs.get("workers", 1)
         force_parallel = kwargs.get("force_parallel", False)
-        skip_tests = kwargs.get("skip_tests", None)
 
         self._scheduler = SuiteScheduler(
             sut=self._sut,
@@ -88,7 +90,6 @@ class Session:
             suite_timeout=suite_timeout,
             exec_timeout=self._exec_timeout,
             max_workers=workers,
-            skip_tests=skip_tests,
             force_parallel=force_parallel)
 
         self._curr_suite = ''
@@ -133,13 +134,13 @@ class Session:
 
         async def save_test_file(results: TestResults) -> None:
             epath = os.path.join(self._tmpdir.abspath, 'executed')
-            with open(epath, 'a+', encoding='utf-8') as efile:
-                efile.write(f"{self._curr_suite}::{results.test.name}\n")
+            async with AsyncFile(epath, 'a+') as efile:
+                await efile.write(f"{self._curr_suite}::{results.test.name}\n")
 
         libkirk.events.register("suite_started", save_suite_started)
         libkirk.events.register("test_completed", save_test_file)
 
-    def _read_restored_session(self, path: str) -> dict:
+    async def _read_restored_session(self, path: str) -> dict:
         """
         Read restored session.
         """
@@ -153,8 +154,8 @@ class Session:
 
         self._logger.info("Reading previous executed tests")
 
-        with open(epath, 'r', encoding='utf-8') as efile:
-            for line in efile:
+        async with AsyncFile(epath, 'r') as efile:
+            async for line in efile:
                 suite, test = line.split('::')
                 if not (suite and test):
                     continue
@@ -186,16 +187,16 @@ class Session:
         await libkirk.events.fire("sut_stop", self._sut.name)
         await self._sut.stop(iobuffer=RedirectSUTStdout(self._sut, False))
 
-    async def _read_suites(self, suites: list, restore: str) -> list:
+    async def _get_suites_objects(self, names: list) -> list:
         """
-        Read suites and return a list of Suite objects.
+        Return suites objects by giving their names.
         """
         coros = []
-        for suite in suites:
+        for suite in names:
             coros.append(self._framework.find_suite(self._sut, suite))
 
         if not coros:
-            raise KirkException(f"Can't find suites: {suites}")
+            raise KirkException(f"Can't find suites: {names}")
 
         suites_obj = await asyncio.gather(*coros, return_exceptions=True)
         for suite in suites_obj:
@@ -205,24 +206,97 @@ class Session:
             if not suite:
                 raise KirkException("Can't find suite objects")
 
-        restored = self._read_restored_session(restore)
-        if restored:
-            await libkirk.events.fire("session_restore", restore)
+        return suites_obj
 
-            for suite_obj in suites_obj:
-                toremove = []
-                suite = suite_obj.name
-                if suite not in restored:
-                    continue
+    async def _restore_tests(self, suites_obj: list, restore: bool) -> None:
+        """
+        Remove all tests but the one which need to be restored.
+        """
+        restored = await self._read_restored_session(restore)
+        if not restored:
+            return
 
-                for test in suite_obj.tests:
-                    if test.name in restored[suite]:
-                        toremove.append(test)
+        await libkirk.events.fire("session_restore", restore)
 
-                for test in toremove:
-                    suite_obj.tests.remove(test)
+        for suite_obj in suites_obj:
+            toremove = []
+            suite = suite_obj.name
+            if suite not in restored:
+                continue
 
-                toremove.clear()
+            for test in suite_obj.tests:
+                if test.name in restored[suite]:
+                    toremove.append(test)
+
+            for test in toremove:
+                suite_obj.tests.remove(test)
+
+            toremove.clear()
+
+    @staticmethod
+    def _filter_tests(
+            suites_obj: list,
+            regex: str,
+            when_matching: bool) -> None:
+        """
+        Filter tests according to `regex`, if `when_matching` is True.
+        """
+        if not regex:
+            return
+
+        matcher = re.compile(regex)
+
+        for suite_obj in suites_obj:
+            toremove = []
+
+            for test in suite_obj.tests:
+                match = matcher.search(test.name)
+                if (not match and not when_matching) or \
+                        match and when_matching:
+                    toremove.append(test)
+
+            for item in toremove:
+                suite_obj.tests.remove(item)
+
+    @staticmethod
+    def _apply_iterate(suites_obj: list, suite_iterate: int) -> list:
+        """
+        Return testing suites after applying iterate parameters.
+        """
+        if suite_iterate <= 1:
+            return suites_obj
+
+        suites_list = []
+        for suite in suites_obj:
+            for i in range(0, suite_iterate):
+                obj = copy.deepcopy(suite)
+                obj.name = f"{suite.name}[{i}]"
+                suites_list.append(obj)
+
+        return suites_list
+
+    async def _read_suites(
+            self,
+            suites: list,
+            pattern: str,
+            skip_tests: str,
+            restore: str) -> list:
+        """
+        Read suites and return a list of Suite objects.
+        """
+        suites_obj = await self._get_suites_objects(suites)
+
+        await self._restore_tests(suites_obj, restore)
+
+        self._filter_tests(suites_obj, pattern, False)
+        self._filter_tests(suites_obj, skip_tests, True)
+
+        num_tests = 0
+        for suite_obj in suites_obj:
+            num_tests += len(suite_obj.tests)
+
+        if num_tests == 0:
+            raise KirkException("No tests selected")
 
         return suites_obj
 
@@ -286,22 +360,69 @@ class Session:
             await libkirk.events.fire("session_stopped")
             self._stop = False
 
-    async def run(
-            self,
-            command: str = None,
-            suites: list = None,
-            report_path: str = None,
-            restore: str = None) -> None:
+    async def _schedule_once(self, suites_obj: list) -> None:
+        """
+        Schedule tests only once.
+        """
+        await self._scheduler.schedule(suites_obj)
+        self._results.extend(self._scheduler.results)
+
+    async def _schedule_infinite(self, suites_obj: list) -> None:
+        """
+        Schedule all testing suites infinite times.
+        """
+        suites_list = []
+        suites_list.extend(suites_obj)
+
+        count = 1
+        while not self._stop:
+            await self._schedule_once(suites_obj)
+            if self._scheduler.stopped:
+                break
+
+            count += 1
+
+            suites_list.clear()
+            for suite in copy.deepcopy(suites_obj):
+                suite.name = f"{suite.name}[{count}]"
+                suites_list.append(suite)
+
+    async def _run_scheduler(self, suites_obj: list, runtime: int) -> None:
+        """
+        Run the scheduler for specific amount of time given by `runtime`.
+        """
+        if runtime <= 0:
+            await self._schedule_once(suites_obj)
+            return
+
+        try:
+            await asyncio.wait_for(
+                self._schedule_infinite(suites_obj),
+                runtime)
+        except asyncio.TimeoutError:
+            await self._scheduler.stop()
+
+    async def run(self, **kwargs: dict) -> None:
         """
         Run a new session and store results inside a JSON file.
         :param command: single command to run before suites
         :type command: str
         :param suites: list of suites to execute
         :type suites: list
+        :param pattern: regex pattern to include tests
+        :types pattern: str
+        :param skip_tests: regex for tests to skip
+        :types skip_tests: str
         :param report_path: JSON report path
         :type report_path: str
         :param restore: temporary directory generated by a previous session
         :type restore: str
+        :param suite_iterate: execute all suites multiple times
+        :type suite_iterate: int
+        :param randomize: randomize all tests if True
+        :type randomize: bool
+        :param runtime: for how long we want to run the session
+        :type runtime: int
         """
         async with self._run_lock:
             await libkirk.events.fire("session_started", self._tmpdir.abspath)
@@ -314,12 +435,29 @@ class Session:
             try:
                 await self._start_sut()
 
+                command = kwargs.get("command", None)
                 if command:
                     await self._exec_command(command)
 
+                suites = kwargs.get("suites", None)
                 if suites:
-                    suites_obj = await self._read_suites(suites, restore)
-                    await self._scheduler.schedule(suites_obj)
+                    suites_obj = await self._read_suites(
+                        suites,
+                        kwargs.get("pattern", None),
+                        kwargs.get("skip_tests", None),
+                        kwargs.get("restore", False))
+
+                    suites_obj = self._apply_iterate(
+                        suites_obj,
+                        kwargs.get("suite_iterate", 1))
+
+                    if kwargs.get("randomize", False):
+                        for suite in suites_obj:
+                            random.shuffle(suite.tests)
+
+                    await self._run_scheduler(
+                        suites_obj,
+                        kwargs.get("runtime", 0))
             except KirkException as err:
                 if not self._stop:
                     self._logger.exception(err)
@@ -327,22 +465,23 @@ class Session:
                     raise err
             finally:
                 try:
-                    if self._scheduler.results:
+                    if self._results:
                         exporter = JSONExporter()
 
                         tasks = []
                         tasks.append(
                             exporter.save_file(
-                                self._scheduler.results,
+                                self._results,
                                 os.path.join(
                                     self._tmpdir.abspath,
                                     "results.json")
                             ))
 
+                        report_path = kwargs.get("report_path", None)
                         if report_path:
                             tasks.append(
                                 exporter.save_file(
-                                    self._scheduler.results,
+                                    self._results,
                                     report_path
                                 ))
 
@@ -356,4 +495,5 @@ class Session:
                     await libkirk.events.fire("session_error", str(err))
                     raise err
                 finally:
+                    self._results.clear()
                     await self._inner_stop()

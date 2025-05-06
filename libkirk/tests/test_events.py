@@ -6,7 +6,13 @@ import pytest
 import libkirk
 
 
-pytestmark = pytest.mark.asyncio
+@pytest.fixture(autouse=True)
+def cleanup():
+    """
+    Cleanup all events after each test.
+    """
+    yield
+    libkirk.events.reset()
 
 
 def test_reset():
@@ -56,9 +62,38 @@ def test_unregister_errors():
         libkirk.events.unregister(None)
 
 
-def test_unregister():
+def test_unregister_all():
     """
-    Test unregister method.
+    Test unregister method removing all coroutine
+    from the events list.
+    """
+    async def funct1():
+        pass
+
+    async def funct2():
+        pass
+
+    assert not libkirk.events.is_registered("myevent")
+
+    # register events first
+    libkirk.events.register("myevent", funct1)
+    assert libkirk.events.is_registered("myevent")
+
+    libkirk.events.register("myevent", funct2)
+    assert libkirk.events.is_registered("myevent")
+
+    # unregister events one by one
+    libkirk.events.unregister("myevent", funct1)
+    assert libkirk.events.is_registered("myevent")
+
+    libkirk.events.unregister("myevent", funct2)
+    assert not libkirk.events.is_registered("myevent")
+
+
+def test_unregister_single():
+    """
+    Test unregister method removing a single coroutine
+    from the events list.
     """
     async def funct():
         pass
@@ -66,10 +101,11 @@ def test_unregister():
     libkirk.events.register("myevent", funct)
     assert libkirk.events.is_registered("myevent")
 
-    libkirk.events.unregister("myevent")
+    libkirk.events.unregister("myevent", funct)
     assert not libkirk.events.is_registered("myevent")
 
 
+@pytest.mark.asyncio
 async def test_fire_errors():
     """
     Test fire method during errors.
@@ -78,6 +114,7 @@ async def test_fire_errors():
         await libkirk.events.fire(None, "prova")
 
 
+@pytest.mark.asyncio
 async def test_fire():
     """
     Test fire method.

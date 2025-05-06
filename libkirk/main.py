@@ -25,6 +25,7 @@ from libkirk.ui import VerboseUserInterface
 from libkirk.ui import ParallelUserInterface
 from libkirk.session import Session
 from libkirk.tempfile import TempDir
+from libkirk.monitor import JSONFileMonitor
 
 # runtime loaded SUT(s)
 LOADED_SUT = []
@@ -128,6 +129,52 @@ def _env_config(value: str) -> dict:
     config = _from_params_to_config(params)
 
     return config
+
+
+def _iterate_config(value: str) -> int:
+    """
+    Return the iterate value.
+    """
+    if not value:
+        return 1
+
+    ret = 1
+    try:
+        ret = int(value)
+    except TypeError as err:
+        raise argparse.ArgumentTypeError("Invalid number") from err
+
+    if ret <= 1:
+        return 1
+
+    return ret
+
+
+def _time_config(data: str) -> int:
+    """
+    Return the time in seconds from '30s', '4m', '5h', '20d' format.
+    If no suffix is specified, value is considered in seconds.
+    """
+    indata = data.strip()
+
+    match = re.search(r'^(?P<value>\d+)\s*(?P<suffix>[smhd]?)$', indata)
+    if not match:
+        raise argparse.ArgumentTypeError(f"Incorrect time format '{indata}'")
+
+    value = int(match.group('value'))
+    suffix = match.group('suffix')
+
+    if not suffix or suffix == 's':
+        return value
+
+    if suffix == 'm':
+        value *= 60
+    elif suffix == 'h':
+        value *= 3600
+    elif suffix == 'd':
+        value *= 3600 * 24
+
+    return value
 
 
 def _discover_sut(path: str) -> None:
@@ -281,8 +328,12 @@ def _start_session(
         exec_timeout=args.exec_timeout,
         suite_timeout=args.suite_timeout,
         workers=args.workers,
-        force_parallel=args.force_parallel,
-        skip_tests=skip_tests)
+        force_parallel=args.force_parallel)
+
+    # initialize monitor file
+    monitor = None
+    if args.monitor:
+        monitor = JSONFileMonitor(args.monitor)
 
     # initialize user interface
     if args.workers > 1:
@@ -296,23 +347,42 @@ def _start_session(
     # start event loop
     exit_code = RC_OK
 
+    # read tests regex filter
+    run_pattern = args.run_pattern
+    if run_pattern:
+        try:
+            re.compile(run_pattern)
+        except re.error:
+            parser.error(f"'{run_pattern}' is not a valid regular expression")
+
     async def session_run() -> None:
         """
         Run session then stop events handler.
         """
         try:
+            if monitor:
+                await monitor.start()
+
             await session.run(
                 command=args.run_command,
                 suites=args.run_suite,
+                pattern=run_pattern,
                 report_path=args.json_report,
                 restore=restore_dir,
+                suite_iterate=args.suite_iterate,
+                skip_tests=skip_tests,
+                randomize=args.randomize,
+                runtime=args.runtime,
             )
         except asyncio.CancelledError:
             await session.stop()
         finally:
             await libkirk.events.stop()
+            if monitor:
+                await monitor.stop()
 
     loop = libkirk.get_event_loop()
+    exit_code = RC_OK
 
     try:
         loop.run_until_complete(
@@ -329,6 +399,12 @@ def _start_session(
         try:
             # at this point loop has been closed, so we can collect all
             # tasks and cancel them
+            loop.run_until_complete(
+                asyncio.gather(*[
+                    session.stop(),
+                    libkirk.events.stop(),
+                ])
+            )
             libkirk.cancel_tasks(loop)
         except KeyboardInterrupt:
             pass
@@ -347,110 +423,129 @@ def run(cmd_args: list = None) -> None:
     parser = argparse.ArgumentParser(
         description='Kirk - All-in-one Linux Testing Framework')
 
-    # generic arguments
-    parser.add_argument(
+    generic_opts = parser.add_argument_group('General options')
+    generic_opts.add_argument(
         "--version",
         "-V",
         action="version",
         version=f"%(prog)s, {__version__}")
-
-    # user interface arguments
-    parser.add_argument(
+    generic_opts.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         help="Verbose mode")
-    parser.add_argument(
+    generic_opts.add_argument(
         "--no-colors",
         "-n",
         action="store_true",
         help="If defined, no colors are shown")
-
-    # generic directories arguments
-    parser.add_argument(
+    generic_opts.add_argument(
         "--tmp-dir",
         "-d",
         type=str,
         default="/tmp",
         help="Temporary directory")
-    parser.add_argument(
+    generic_opts.add_argument(
         "--restore",
-        "-R",
+        "-r",
         type=str,
         help="Restore a specific session")
+    generic_opts.add_argument(
+        "--json-report",
+        "-o",
+        type=str,
+        help="JSON output report")
+    generic_opts.add_argument(
+        "--monitor",
+        "-m",
+        type=str,
+        help="Location of the monitor file")
 
-    # tests setup arguments
-    parser.add_argument(
+    conf_opts = parser.add_argument_group('Configuration options')
+    conf_opts.add_argument(
+        "--sut",
+        "-u",
+        default="host",
+        type=_sut_config,
+        help="System Under Test parameters. For help please use '--sut help'")
+    conf_opts.add_argument(
+        "--framework",
+        "-U",
+        default="ltp",
+        type=_framework_config,
+        help="Framework parameters. For help please use '--framework help'")
+    conf_opts.add_argument(
         "--env",
         "-e",
         type=_env_config,
         help="List of key=value environment values separated by ':'")
-    parser.add_argument(
+    conf_opts.add_argument(
         "--skip-tests",
-        "-i",
+        "-s",
         type=str,
         help="Skip specific tests")
-    parser.add_argument(
+    conf_opts.add_argument(
         "--skip-file",
-        "-I",
+        "-S",
         type=str,
         help="Skip specific tests using a skip file (newline separated item)")
-    parser.add_argument(
-        "--suite-timeout",
-        "-T",
-        type=int,
-        default=3600,
-        help="Timeout before stopping the suite")
-    parser.add_argument(
-        "--exec-timeout",
-        "-t",
-        type=int,
-        default=3600,
-        help="Timeout before stopping a single execution")
 
-    # tests execution arguments
-    parser.add_argument(
+    exec_opts = parser.add_argument_group('Execution options')
+    exec_opts.add_argument(
         "--run-suite",
-        "-r",
+        "-f",
         nargs="*",
         help="List of suites to run")
-    parser.add_argument(
+    exec_opts.add_argument(
+        "--run-pattern",
+        "-p",
+        help="Run all tests matching the regex pattern")
+    exec_opts.add_argument(
         "--run-command",
         "-c",
         help="Command to run")
-    parser.add_argument(
+    exec_opts.add_argument(
+        "--suite-timeout",
+        "-T",
+        type=_time_config,
+        default="1h",
+        help="Timeout before stopping the suite (default: 1h)")
+    exec_opts.add_argument(
+        "--exec-timeout",
+        "-t",
+        type=_time_config,
+        default="1h",
+        help="Timeout before stopping a single execution (default: 1h)")
+    exec_opts.add_argument(
+        "--randomize",
+        "-R",
+        action="store_true",
+        help="Force parallelization execution of all tests")
+    exec_opts.add_argument(
+        "--runtime",
+        "-I",
+        type=_time_config,
+        default="0",
+        help="Set for how long we want to run the session in seconds")
+    exec_opts.add_argument(
+        "--suite-iterate",
+        "-i",
+        type=_iterate_config,
+        default=1,
+        help="Number of times to repeat testing suites")
+    exec_opts.add_argument(
         "--workers",
         "-w",
         type=int,
         default=1,
         help="Number of workers to execute tests in parallel")
-    parser.add_argument(
+    exec_opts.add_argument(
         "--force-parallel",
-        "-p",
+        "-F",
         action="store_true",
         help="Force parallelization execution of all tests")
 
-    # session arguments
-    parser.add_argument(
-        "--sut",
-        "-s",
-        default="host",
-        type=_sut_config,
-        help="System Under Test parameters. For help please use '-s help'")
-    parser.add_argument(
-        "--framework",
-        "-f",
-        default="ltp",
-        type=_framework_config,
-        help="Framework parameters. For help please use '-f help'")
-
     # output arguments
-    parser.add_argument(
-        "--json-report",
-        "-j",
-        type=str,
-        help="JSON output report")
-
     # parse comand line
     args = parser.parse_args(cmd_args)
 
@@ -464,6 +559,9 @@ def run(cmd_args: list = None) -> None:
 
     if args.json_report and os.path.exists(args.json_report):
         parser.error(f"JSON report file already exists: {args.json_report}")
+
+    if args.run_pattern and not args.run_suite:
+        parser.error("--run-pattern must be used with --run-suite")
 
     if not args.run_suite and not args.run_command:
         parser.error("--run-suite/--run-command are required")
