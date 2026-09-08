@@ -1,24 +1,28 @@
 """
 Unittests for ltx module.
 """
+
 import os
-import time
 import signal
-import asyncio.subprocess
+import subprocess
+import time
+from typing import Any, List
+
 import pytest
-from libkirk.ltx import LTX
-from libkirk.ltx import Requests
-from libkirk.ltx_sut import LTXSUT
+
+import libkirk.com
+from libkirk.sut_base import GenericSUT
 from libkirk.tests.test_sut import _TestSUT
 from libkirk.tests.test_session import _TestSession
+from libkirk.channels.ltx import LTX, Requests
+from libkirk.tests.test_com import _TestComChannel
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.ltx]
+pytestmark = [pytest.mark.ltx]
 
 TEST_LTX_BINARY = os.environ.get("TEST_LTX_BINARY", None)
 
 if not TEST_LTX_BINARY or not os.path.isfile(TEST_LTX_BINARY):
-    pytestmark.append(pytest.mark.skip(
-        reason="TEST_LTX_BINARY doesn't exist"))
+    pytestmark.append(pytest.mark.skip(reason="TEST_LTX_BINARY doesn't exist"))
 
 
 class TestLTX:
@@ -31,25 +35,28 @@ class TestLTX:
         """
         LTX handler.
         """
-        stdin_path = str(tmpdir / 'transport.in')
-        stdout_path = str(tmpdir / 'transport.out')
+        infile = str(tmpdir / "transport.in")
+        outfile = str(tmpdir / "transport.out")
 
-        os.mkfifo(stdin_path)
-        os.mkfifo(stdout_path)
+        os.mkfifo(infile)
+        os.mkfifo(outfile)
 
-        stdin = os.open(stdin_path, os.O_RDWR | os.O_NONBLOCK)
-        stdout = os.open(stdout_path, os.O_RDWR)
+        stdin = os.open(infile, os.O_RDWR | os.O_NONBLOCK)
+        stdout = os.open(outfile, os.O_RDWR)
 
-        proc = await asyncio.subprocess.create_subprocess_shell(
+        assert TEST_LTX_BINARY is not None
+        proc = subprocess.Popen(
             TEST_LTX_BINARY,
             stdin=stdin,
-            stdout=stdout)
+            stdout=stdout,
+        )
 
         try:
-            async with LTX(stdin, stdout) as handle:
+            async with LTX(infile, outfile) as handle:
                 yield handle
         finally:
             proc.kill()
+            proc.wait()
 
     async def test_version(self, ltx):
         """
@@ -82,7 +89,7 @@ class TestLTX:
         replies = await ltx.gather([req])
         reply = replies[req]
 
-        assert ''.join(stdout) == "Linux\n"
+        assert "".join(stdout) == "Linux\n"
         assert start_t < reply[0] * 1e-9 < time.monotonic()
         assert reply[1] == 1
         assert reply[2] == 0
@@ -98,12 +105,11 @@ class TestLTX:
             stdout.append(data)
 
         start_t = time.monotonic()
-        req = Requests.execute(
-            0, "echo -n ciao", stdout_coro=_stdout_coro)
+        req = Requests.execute(0, "echo -n ciao", stdout_coro=_stdout_coro)
         replies = await ltx.gather([req])
         reply = replies[req]
 
-        assert ''.join(stdout) == "ciao"
+        assert "".join(stdout) == "ciao"
         assert start_t < reply[0] * 1e-9 < time.monotonic()
         assert reply[1] == 1
         assert reply[2] == 0
@@ -121,10 +127,7 @@ class TestLTX:
 
         req = []
         for slot in range(times):
-            req.append(Requests.execute(
-                slot,
-                "echo -n ciao",
-                stdout_coro=_stdout_coro))
+            req.append(Requests.execute(slot, "echo -n ciao", stdout_coro=_stdout_coro))
 
         start_t = time.monotonic()
         replies = await ltx.gather(req)
@@ -143,8 +146,8 @@ class TestLTX:
         """
         Test set_file request.
         """
-        data = b'AaXa\x00\x01\x02Zz' * 1024
-        pfile = tmp_path / 'file.bin'
+        data = b"AaXa\x00\x01\x02Zz" * 1024
+        pfile = tmp_path / "file.bin"
 
         req = Requests.set_file(str(pfile), data)
         await ltx.gather([req])
@@ -155,8 +158,8 @@ class TestLTX:
         """
         Test get_file request.
         """
-        pfile = tmp_path / 'file.bin'
-        pfile.write_bytes(b'AaXa\x00\x01\x02Zz' * 1024)
+        pfile = tmp_path / "file.bin"
+        pfile.write_bytes(b"AaXa\x00\x01\x02Zz" * 1024)
 
         req = Requests.get_file(str(pfile))
         replies = await ltx.gather([req])
@@ -247,10 +250,10 @@ class TestLTX:
         """
         Test all requests together.
         """
-        data = b'AaXa\x00\x01\x02Zz' * 1024
-        pfile = tmp_path / 'file.bin'
+        data = b"AaXa\x00\x01\x02Zz" * 1024
+        pfile = tmp_path / "file.bin"
 
-        requests = []
+        requests: List[Any] = []
         requests.append(Requests.version())
         requests.append(Requests.set_file(str(pfile), data))
         requests.append(Requests.ping())
@@ -263,49 +266,69 @@ class TestLTX:
 
 
 @pytest.fixture
-async def sut(tmpdir):
+async def com(tmpdir):
     """
-    LTXSUT instance object.
+    LTXComChannel instance object.
     """
-    stdin_path = str(tmpdir / 'transport.in')
-    stdout_path = str(tmpdir / 'transport.out')
+    infile = str(tmpdir / "transport.in")
+    outfile = str(tmpdir / "transport.out")
 
-    os.mkfifo(stdin_path)
-    os.mkfifo(stdout_path)
+    os.mkfifo(infile)
+    os.mkfifo(outfile)
 
-    stdin = os.open(stdin_path, os.O_RDONLY | os.O_NONBLOCK)
-    stdout = os.open(stdout_path, os.O_RDWR)
+    stdin = os.open(infile, os.O_RDONLY | os.O_NONBLOCK)
+    stdout = os.open(outfile, os.O_RDWR)
 
-    proc = await asyncio.subprocess.create_subprocess_shell(
+    assert TEST_LTX_BINARY is not None
+    proc = subprocess.Popen(
         TEST_LTX_BINARY,
         stdin=stdin,
-        stdout=stdout)
+        stdout=stdout,
+    )
 
-    sut = LTXSUT()
-    sut.setup(
-        cwd=str(tmpdir),
-        env=dict(HELLO="WORLD"),
-        stdin=stdin_path,
-        stdout=stdout_path)
+    obj = next((c for c in libkirk.com.get_channels() if c.name == "ltx"), None)
+    assert obj is not None
+    obj.setup(cwd=str(tmpdir), env=dict(HELLO="WORLD"), infile=infile, outfile=outfile)
 
-    yield sut
+    yield obj
 
-    if await sut.is_running:
-        await sut.stop()
+    if await obj.active():
+        await obj.stop()
 
     proc.kill()
+    proc.wait()
 
 
-class TestLTXSUT(_TestSUT):
+class TestLTXComChannel(_TestComChannel):
     """
-    Test HostSUT implementation.
+    Test LTXComChannel implementation.
     """
 
-    async def test_fetch_file_stop(self):
+    async def test_fetch_file_stop(self, com):
         pytest.skip(reason="LTX doesn't support stop for GET_FILE")
 
 
-class TestLTXSession(_TestSession):
+@pytest.fixture
+async def sut(com):
     """
-    Test Session implementation using LTX SUT.
+    SUT object to test.
+    """
+    obj = GenericSUT()
+    obj.setup(com="ltx")
+
+    yield obj
+
+    if await obj.is_running():
+        await obj.stop()
+
+
+class TestSUTLTX(_TestSUT):
+    """
+    Test LTXComChannel implementation in within SUT.
+    """
+
+
+class TestSessionLTXComChannel(_TestSession):
+    """
+    Test Session using LTXComChannel.
     """

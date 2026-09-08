@@ -5,18 +5,18 @@
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
-import os
+
 import json
 import logging
-from libkirk import KirkException
+import os
+from typing import List
+
+from libkirk.errors import ExporterError
 from libkirk.io import AsyncFile
-from libkirk.results import ResultStatus
-
-
-class ExporterError(KirkException):
-    """
-    Raised when an error occurs during Exporter operations.
-    """
+from libkirk.results import (
+    ResultStatus,
+    SuiteResults,
+)
 
 
 class Exporter:
@@ -24,13 +24,14 @@ class Exporter:
     A class used to export Results into report file.
     """
 
-    async def save_file(self, results: list, path: str) -> None:
+    async def save_file(self, results: List[SuiteResults], path: str) -> None:
         """
         Save report into a file by taking information from SUT and testing
         results.
-        :param results: list of suite results to export.
+
+        :param results: List of suite results to export.
         :type results: list(SuiteResults)
-        :param path: path of the file to save.
+        :param path: Path of the file to save.
         :type path: str
         """
         raise NotImplementedError()
@@ -44,8 +45,7 @@ class JSONExporter(Exporter):
     def __init__(self) -> None:
         self._logger = logging.getLogger("kirk.json")
 
-    # pylint: disable=too-many-locals
-    async def save_file(self, results: list, path: str) -> None:
+    async def save_file(self, results: List[SuiteResults], path: str) -> None:
         if not results or len(results) == 0:
             raise ValueError("results is empty")
 
@@ -101,12 +101,13 @@ class JSONExporter(Exporter):
                 "failed": sum(result.failed for result in results),
                 "broken": sum(result.broken for result in results),
                 "skipped": sum(result.skipped for result in results),
-                "warnings": sum(result.warnings for result in results)
+                "warnings": sum(result.warnings for result in results),
             },
             "environment": {
                 "distribution": results[0].distro,
                 "distribution_version": results[0].distro_ver,
                 "kernel": results[0].kernel,
+                "cmdline": results[0].cmdline,
                 "arch": results[0].arch,
                 "cpu": results[0].cpu,
                 "swap": results[0].swap,
@@ -114,7 +115,7 @@ class JSONExporter(Exporter):
             },
         }
 
-        async with AsyncFile(path, "w+") as outfile:
+        async with AsyncFile(path, "w") as outfile:
             text = json.dumps(data, indent=4)
             await outfile.write(text)
 

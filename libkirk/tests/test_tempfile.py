@@ -1,8 +1,11 @@
 """
 Unittest for temporary module.
 """
+
 import os
+
 import pytest
+
 from libkirk.tempfile import TempDir
 
 
@@ -18,10 +21,6 @@ class TestTempDir:
         with pytest.raises(ValueError):
             TempDir(root="this_folder_doesnt_exist")
 
-    # for some reasons, following test fails on systems which are slow
-    # to release directories after remove (in particular remote containers)
-    # even after os.sync or time.sleep. So we XFAIL this test by default
-    @pytest.mark.xfail
     def test_rotate(self, tmpdir):
         """
         Test folders rotation.
@@ -37,10 +36,12 @@ class TestTempDir:
 
             assert tempdir.abspath is not None
             assert tempdir.abspath == os.readlink(
-                os.path.join(tempdir.abspath, "..", tempdir.SYMLINK_NAME))
+                os.path.join(tempdir.abspath, "..", tempdir.SYMLINK_NAME)
+            )
 
         os.sync()
 
+        assert tempdir is not None
         total = 0
         for _, dirs, _ in os.walk(os.path.join(tempdir.abspath, "..")):
             for mydir in dirs:
@@ -66,8 +67,7 @@ class TestTempDir:
 
         for i in range(0, 10):
             tempdir.mkdir(f"myfolder/{i}")
-            assert os.path.isdir(os.path.join(
-                tempdir.abspath, f"myfolder/{i}"))
+            assert os.path.isdir(os.path.join(tempdir.abspath, f"myfolder/{i}"))
 
     def test_mkdir_no_root(self):
         """

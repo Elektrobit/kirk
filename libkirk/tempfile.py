@@ -5,36 +5,37 @@
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
+
 import os
+import pathlib
 import pwd
 import shutil
-import pathlib
 import tempfile
+from typing import Optional
 
 
 class TempDir:
     """
     Temporary directory handler.
     """
+
     SYMLINK_NAME = "latest"
     FOLDER_PREFIX = "kirk."
 
-    def __init__(self, root: str = None, max_rotate: int = 5) -> None:
+    def __init__(self, root: Optional[str], max_rotate: int = 5) -> None:
         """
-        :param root: root directory (i.e. /tmp). If None, TempDir will handle
+        :param root: Root directory (i.e. /tmp). If None, TempDir will handle
             requests without adding any file or directory.
         :type root: str | None
-        :param max_rotate: maximum number of temporary directories
+        :param max_rotate: Maximum number of temporary directories.
         :type max_rotate: int
         """
         if root and not os.path.isdir(root):
             raise ValueError(f"root folder doesn't exist: {root}")
 
-        self._root = root
-        if root:
-            self._root = os.path.abspath(root)
-
+        self._root = os.path.abspath(root) if root else None
         self._max_rotate = max(max_rotate, 0)
+        self._username = pwd.getpwuid(os.getuid()).pw_name if root else None
         self._folder = self._rotate()
 
     def _rotate(self) -> str:
@@ -45,27 +46,23 @@ class TempDir:
         if not self._root:
             return ""
 
-        name = pwd.getpwuid(os.getuid()).pw_name
-        tmpbase = os.path.join(self._root, f"{self.FOLDER_PREFIX}{name}")
+        tmpbase = os.path.join(self._root, f"{self.FOLDER_PREFIX}{self._username}")
 
         os.makedirs(tmpbase, exist_ok=True)
 
-        # delete the first max_rotate items
+        # filter out symlink before sorting and counting
+        all_paths = list(pathlib.Path(tmpbase).iterdir())
         sorted_paths = sorted(
-            pathlib.Path(tmpbase).iterdir(),
-            key=os.path.getmtime)
+            (p for p in all_paths if p.name != self.SYMLINK_NAME), key=os.path.getmtime
+        )
 
-        # don't consider latest symlink
-        num_paths = len(sorted_paths) - 1
+        num_paths = len(sorted_paths)
 
         if num_paths >= self._max_rotate:
             max_items = num_paths - self._max_rotate + 1
-            paths = sorted_paths[:max_items]
+            paths_to_remove = sorted_paths[:max_items]
 
-            for path in paths:
-                if path.name == self.SYMLINK_NAME:
-                    continue
-
+            for path in paths_to_remove:
                 shutil.rmtree(str(path.resolve()))
 
         # create a new folder
@@ -76,49 +73,49 @@ class TempDir:
         if os.path.islink(latest):
             os.remove(latest)
 
-        os.symlink(
-            folder,
-            os.path.join(tmpbase, self.SYMLINK_NAME),
-            target_is_directory=True)
+        os.symlink(folder, latest, target_is_directory=True)
 
         return folder
 
     @property
     def root(self) -> str:
         """
-        The root folder. For example, if temporary folder is
-        "/tmp/kirk.acer/tmpf547ftxv" the method will return "/tmp".
-        If root folder has not been given during object creation, this
-        method returns an empty string.
+        :return: The root folder. For example, if temporary folder is
+            "/tmp/kirk.acer/tmpf547ftxv" the method will return "/tmp".
+            If root folder has not been given during object creation, this
+            method returns an empty string.
+        :rtype: str
         """
-        return self._root if self._root else ""
+        return self._root or ""
 
     @property
     def abspath(self) -> str:
         """
-        Absolute path of the temporary directory.
+        :return: Absolute path of the temporary directory.
+        :rtype: str
         """
         return self._folder
 
     def mkdir(self, path: str) -> None:
         """
         Create a directory inside temporary directory.
-        :param path: path of the directory
+
+        :param path: Path of the directory.
         :type path: str
-        :returns: folder path.
+        :returns: Folder path.
         """
         if not self._folder:
             return
 
-        dpath = os.path.join(self._folder, path)
-        os.mkdir(dpath)
+        os.mkdir(os.path.join(self._folder, path))
 
-    def mkfile(self, path: str, content: bytes) -> None:
+    def mkfile(self, path: str, content: str) -> None:
         """
         Create a file inside temporary directory.
-        :param path: path of the file
+
+        :param path: Path of the file.
         :type path: str
-        :param content: file content
+        :param content: File content.
         :type content: str
         """
         if not self._folder:

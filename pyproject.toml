@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kirk"
 dynamic = ["version"]
-description = "All-in-one Linux Testing Framework"
-readme = "README.md"
+description = "Linux Test Project tests executor"
+readme = "README.rst"
 license = {file = "LICENSE"}
 requires-python = ">=3.6"
 keywords = ["testing", "linux", "development", "ltp", "linux-test-project"]
@@ -29,6 +29,7 @@ classifiers = [
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Software Development :: Testing",
 ]
 
@@ -40,15 +41,20 @@ classifiers = [
 version = {attr = "libkirk.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["libkirk"]
+include = ["libkirk", "libkirk.*"]
 exclude = ["libkirk.tests"]
 
 [project.scripts]
 kirk = "libkirk.main:run"
 
 [project.optional-dependencies]
-ssh = ["asyncssh <= 2.17.0"]
-ltx = ["msgpack <= 1.1.0"]
+testing = ["pytest", "pytest-asyncio"]
+ssh = ["asyncssh <= 2.22.0"]
+ltx = ["msgpack <= 1.1.2"]
+docs = [
+        "sphinx==9.1.0",
+        "sphinx-rtd-theme==3.1.0",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -61,10 +67,26 @@ filterwarnings = [
         "ignore::DeprecationWarning",
         "ignore::pytest.PytestCollectionWarning",
 ]
-log_cli = "true"
-log_level = "DEBUG"
 markers = [
         "ssh",
         "qemu",
         "ltx",
+]
+
+[tool.pyrefly]
+project-includes = ["**/*"]
+project-excludes = ["**/*venv/**/*"]
+
+[tool.ruff]
+line-length=88
+exclude = [
+        "doc/",
+        "utils/",
+        "libkirk/tests",
+]
+
+[tool.ruff.lint]
+select = [
+        "ANN0",
+        "ANN2",
 ]

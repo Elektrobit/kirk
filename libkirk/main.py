@@ -5,33 +5,42 @@
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
+
+import argparse
+import asyncio
 import os
 import re
-import asyncio
-import argparse
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Union,
+)
+
 import libkirk
-import libkirk.sut
+import libkirk.com
 import libkirk.data
-import libkirk.events
 import libkirk.plugin
+import libkirk.sut
 from libkirk import __version__
-from libkirk import KirkException
-from libkirk.sut import SUT
-from libkirk.sut import SUTError
-from libkirk.framework import Framework
-from libkirk.framework import FrameworkError
-from libkirk.ui import SimpleUserInterface
-from libkirk.ui import VerboseUserInterface
-from libkirk.ui import ParallelUserInterface
-from libkirk.session import Session
-from libkirk.tempfile import TempDir
+from libkirk.com import ComChannel
+from libkirk.errors import (
+    CommunicationError,
+    KirkException,
+    SUTError,
+)
 from libkirk.monitor import JSONFileMonitor
+from libkirk.session import Session
+from libkirk.sut import SUT
+from libkirk.tempfile import TempDir
+from libkirk.ui import (
+    ParallelUserInterface,
+    SimpleUserInterface,
+    VerboseUserInterface,
+)
 
-# runtime loaded SUT(s)
-LOADED_SUT = []
-
-# runtime loaded Framework(s)
-LOADED_FRAMEWORK = []
+# Maximum number of COM instances
+MAX_COM_INSTANCES = 128
 
 # return codes of the application
 RC_OK = 0
@@ -39,96 +48,99 @@ RC_ERROR = 1
 RC_INTERRUPT = 130
 
 
-def _from_params_to_config(params: list) -> dict:
+def _from_params_to_config(params: List[str]) -> Dict[str, str]:
     """
     Return a configuration as dictionary according with input parameters
     given to the commandline option.
     """
     config = {}
     for param in params:
-        if '=' not in param:
+        if "=" not in param:
             raise argparse.ArgumentTypeError(
-                f"Missing '=' assignment in '{param}' parameter")
+                f"Missing '=' assignment in '{param}' parameter"
+            )
 
-        data = param.split('=', 1)
+        data = param.split("=", 1)
         key = data[0]
         value = data[1]
 
         if not key:
-            raise argparse.ArgumentTypeError(
-                f"Empty key for '{param}' parameter")
+            raise argparse.ArgumentTypeError(f"Empty key for '{param}' parameter")
 
-        if not key:
-            raise argparse.ArgumentTypeError(
-                f"Empty value for '{param}' parameter")
+        if not value:
+            raise argparse.ArgumentTypeError(f"Empty value for '{param}' parameter")
 
         config[key] = value
 
     return config
 
 
-def _dict_config(opt_name: str, plugins: list, value: str) -> dict:
+def _dict_config(
+    value: str,
+) -> Dict[str, str]:
     """
     Generic dictionary option configuration.
     """
     if value == "help":
-        msg = f"--{opt_name} option supports the following syntax:\n"
-        msg += "\n\t<name>:<param1>=<value1>:<param2>=<value2>:..\n"
-        msg += "\nSupported plugins: | "
-
-        for plugin in plugins:
-            msg += f"{plugin.name} | "
-
-        msg += '\n'
-
-        for plugin in plugins:
-            if not plugin.config_help:
-                msg += f"\n{plugin.name} has not configuration\n"
-            else:
-                msg += f"\n{plugin.name} configuration:\n"
-                for opt, desc in plugin.config_help.items():
-                    msg += f"\t{opt}: {desc}\n"
-
-        return {"help": msg}
+        return {"help": ""}
 
     if not value:
         raise argparse.ArgumentTypeError("Parameters list can't be empty")
 
-    params = value.split(':')
-    name = params[0]
+    params = value.split(":")
 
     config = _from_params_to_config(params[1:])
-    config['name'] = name
+    config["name"] = params[0]
 
     return config
 
 
-def _sut_config(value: str) -> dict:
+def _com_config(value: str) -> Optional[Dict[str, str]]:
     """
-    Return a SUT configuration according with input string.
+    Return the list of channels configurations.
     """
-    return _dict_config("sut", LOADED_SUT, value)
+    plugins = libkirk.com.get_channels()
+    config = _dict_config(value)
 
+    if "help" in config:
+        return config
 
-def _framework_config(value: str) -> dict:
-    """
-    Return a Framework configuration according with input string.
-    """
-    return _dict_config("framework", LOADED_FRAMEWORK, value)
+    name = config["name"]
 
-
-def _env_config(value: str) -> dict:
-    """
-    Return an environment configuration dictionary, parsing strings such as
-    "key=value:key=value:key=value".
-    """
-    if not value:
-        return None
-
-    params = value.split(':')
-    config = _from_params_to_config(params)
+    plugin_names = {p.name for p in plugins}
+    if name not in plugin_names:
+        raise argparse.ArgumentTypeError(
+            f"Can't find communication handler with name '{name}'"
+        )
 
     return config
+
+
+def _print_plugin_help(
+    opt_name: str,
+    plugins: Union[List[ComChannel], List[SUT]],
+) -> None:
+    """
+    Print the ``plugins`` help for ``opt_name`` option.
+    """
+    msg = f"{opt_name} option supports the following syntax:\n"
+    msg += "\n\t<name>:<param1>=<value1>:<param2>=<value2>:..\n"
+    msg += "\nSupported plugins: | "
+
+    for plugin in plugins:
+        msg += f"{plugin.name} | "
+
+    msg += "\n"
+
+    for plugin in plugins:
+        if not plugin.config_help:
+            msg += f"\n{plugin.name} has not configuration\n"
+        else:
+            msg += f"\n{plugin.name} configuration:\n"
+            for opt, desc in plugin.config_help.items():
+                msg += f"\t{opt}: {desc}\n"
+
+    print(msg)
 
 
 def _iterate_config(value: str) -> int:
@@ -138,16 +150,12 @@ def _iterate_config(value: str) -> int:
     if not value:
         return 1
 
-    ret = 1
     try:
         ret = int(value)
-    except TypeError as err:
+    except (ValueError, TypeError) as err:
         raise argparse.ArgumentTypeError("Invalid number") from err
 
-    if ret <= 1:
-        return 1
-
-    return ret
+    return max(1, ret)
 
 
 def _time_config(data: str) -> int:
@@ -157,86 +165,110 @@ def _time_config(data: str) -> int:
     """
     indata = data.strip()
 
-    match = re.search(r'^(?P<value>\d+)\s*(?P<suffix>[smhd]?)$', indata)
+    match = re.search(r"^(?P<value>\d+)\s*(?P<suffix>[smhd]?)$", indata)
     if not match:
         raise argparse.ArgumentTypeError(f"Incorrect time format '{indata}'")
 
-    value = int(match.group('value'))
-    suffix = match.group('suffix')
+    value = int(match.group("value"))
+    suffix = match.group("suffix")
 
-    if not suffix or suffix == 's':
-        return value
+    # Optimize: use dict lookup instead of if/elif chain
+    multipliers = {
+        "": 1,
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,  # 3600 * 24
+    }
 
-    if suffix == 'm':
-        value *= 60
-    elif suffix == 'h':
-        value *= 3600
-    elif suffix == 'd':
-        value *= 3600 * 24
-
-    return value
+    return value * multipliers.get(suffix, 1)
 
 
-def _discover_sut(path: str) -> None:
+def _finjection_config(value: str) -> int:
     """
-    Discover new SUT implementations.
+    Return probability of fault injection.
     """
-    objs = libkirk.plugin.discover(SUT, path)
-    LOADED_SUT.extend(objs)
+    if not value:
+        return 0
+
+    try:
+        ret = int(value)
+    except (ValueError, TypeError) as err:
+        raise argparse.ArgumentTypeError("Invalid number") from err
+
+    return max(0, min(100, ret))
 
 
-def _discover_frameworks(path: str) -> None:
+def _finterval_config(value: str) -> int:
     """
-    Discover new Framework implementations.
+    Return interval of fault injection.
     """
-    objs = libkirk.plugin.discover(Framework, path)
-    LOADED_FRAMEWORK.extend(objs)
+    if not value:
+        return 1
 
+    try:
+        ret = int(value)
+    except (ValueError, TypeError) as err:
+        raise argparse.ArgumentTypeError("Invalid number") from err
 
-def _get_plugin(plugins: list, name: str) -> object:
-    """
-    Return the Plugin object with given name.
-    """
-    obj = None
-    for obj_comp in plugins:
-        if obj_comp.name == name:
-            obj = obj_comp
-            break
-
-    return obj
+    return max(1, ret)
 
 
 def _get_skip_tests(skip_tests: str, skip_file: str) -> str:
     """
     Return the skipped tests regexp.
     """
-    skip = ""
+    skip_parts = []
 
     if skip_file:
-        lines = None
-        with open(skip_file, 'r', encoding="utf-8") as skip_file_data:
+        with open(skip_file, "r", encoding="utf-8") as skip_file_data:
             lines = skip_file_data.readlines()
 
         toskip = [
             line.rstrip()
             for line in lines
-            if not re.search(r'^\s+#.*', line)
+            if line.strip() and not re.search(r"^\s*#", line)
         ]
-        skip = '|'.join(toskip)
+        if toskip:
+            skip_parts.append("|".join(toskip))
 
     if skip_tests:
-        if skip_file:
-            skip += "|"
+        skip_parts.append(skip_tests)
 
-        skip += skip_tests
+    return "|".join(skip_parts)
 
-    return skip
+
+def _init_channels(
+    args: argparse.Namespace, parser: argparse.ArgumentParser, tmpdir: TempDir
+) -> None:
+    """
+    Initialize channels according to configuration.
+    """
+    for config in args.com:
+        if "id" in config:
+            plugin = libkirk.com.clone_channel(config["name"], config["id"])
+        else:
+            name = config["name"]
+            plugin = next(
+                (c for c in libkirk.com.get_channels() if c.name == name),
+                None,
+            )
+
+            assert plugin
+
+        com_config = config.copy()
+        com_config["tmpdir"] = tmpdir.abspath
+
+        try:
+            # pyrefly: ignore[bad-argument-type]
+            plugin.setup(**com_config)
+        except CommunicationError as err:
+            parser.error(str(err))
 
 
 def _get_sut(
-        args: argparse.Namespace,
-        parser: argparse.ArgumentParser,
-        tmpdir: TempDir) -> SUT:
+    args: argparse.Namespace, parser: argparse.ArgumentParser, tmpdir: TempDir
+) -> SUT:
     """
     Create and return SUT object.
     """
@@ -244,51 +276,24 @@ def _get_sut(
     sut_config["tmpdir"] = tmpdir.abspath
 
     sut_name = args.sut["name"]
-    sut = _get_plugin(LOADED_SUT, sut_name)
+    sut = next((s for s in libkirk.sut.get_suts() if s.name == sut_name), None)
     if not sut:
         parser.error(f"'{sut_name}' SUT is not available")
 
+    # pyrefly: ignore[missing-attribute]
+    sut.optimize = args.optimize_sut
+
     try:
+        # pyrefly: ignore[missing-attribute]
         sut.setup(**sut_config)
     except SUTError as err:
         parser.error(str(err))
 
+    # pyrefly: ignore[bad-return]
     return sut
 
 
-def _get_framework(
-        args: argparse.Namespace,
-        parser: argparse.ArgumentParser) -> Framework:
-    """
-    Create and framework object.
-    """
-    fw_config = args.framework.copy()
-    if args.env:
-        fw_config['env'] = args.env.copy()
-
-    if args.exec_timeout:
-        fw_config['test_timeout'] = args.exec_timeout
-
-    if args.suite_timeout:
-        fw_config['suite_timeout'] = args.suite_timeout
-
-    fw_name = args.framework["name"]
-    framework = _get_plugin(LOADED_FRAMEWORK, fw_name)
-    if not framework:
-        parser.error(f"'{fw_name}' framework is not available")
-
-    try:
-        framework.setup(**fw_config)
-    except FrameworkError as err:
-        parser.error(str(err))
-
-    return framework
-
-
-# pylint: disable=too-many-statements
-def _start_session(
-        args: argparse.Namespace,
-        parser: argparse.ArgumentParser) -> None:
+def _start_session(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """
     Start the LTP session.
     """
@@ -307,28 +312,29 @@ def _start_session(
     if restore_dir and not os.path.isdir(restore_dir):
         parser.error(f"Can't restore '{args.restore}'. Folder doesn't exist")
 
-    # create temporary directory
-    tmpdir = None
-    if args.tmp_dir == '':
+    if args.tmp_dir == "":
         tmpdir = TempDir(None)
     elif args.tmp_dir:
         tmpdir = TempDir(args.tmp_dir)
     else:
         tmpdir = TempDir("/tmp")
 
-    # create SUT and Framework objects
+    # initialize channels
+    if args.com:
+        _init_channels(args, parser, tmpdir)
+
+    # create SUT
     sut = _get_sut(args, parser, tmpdir)
-    framework = _get_framework(args, parser)
 
     # start session
     session = Session(
-        sut=sut,
-        framework=framework,
         tmpdir=tmpdir,
+        sut=sut,
         exec_timeout=args.exec_timeout,
         suite_timeout=args.suite_timeout,
         workers=args.workers,
-        force_parallel=args.force_parallel)
+        force_parallel=args.force_parallel,
+    )
 
     # initialize monitor file
     monitor = None
@@ -338,14 +344,10 @@ def _start_session(
     # initialize user interface
     if args.workers > 1:
         ParallelUserInterface(args.no_colors)
+    elif args.verbose:
+        VerboseUserInterface(args.no_colors)
     else:
-        if args.verbose:
-            VerboseUserInterface(args.no_colors)
-        else:
-            SimpleUserInterface(args.no_colors)
-
-    # start event loop
-    exit_code = RC_OK
+        SimpleUserInterface(args.no_colors)
 
     # read tests regex filter
     run_pattern = args.run_pattern
@@ -368,11 +370,14 @@ def _start_session(
                 suites=args.run_suite,
                 pattern=run_pattern,
                 report_path=args.json_report,
-                restore=restore_dir,
+                restore_path=restore_dir,
                 suite_iterate=args.suite_iterate,
                 skip_tests=skip_tests,
                 randomize=args.randomize,
                 runtime=args.runtime,
+                fault_prob=args.fault_injection,
+                fault_interval=args.fault_interval,
+                dry_run=args.dry_run,
             )
         except asyncio.CancelledError:
             await session.stop()
@@ -386,10 +391,8 @@ def _start_session(
 
     try:
         loop.run_until_complete(
-            asyncio.gather(*[
-                libkirk.events.start(),
-                session_run()
-            ])
+            # pyrefly: ignore[bad-argument-type]
+            asyncio.gather(*[libkirk.events.start(), session_run()])
         )
     except KeyboardInterrupt:
         exit_code = RC_INTERRUPT
@@ -397,164 +400,180 @@ def _start_session(
         exit_code = RC_ERROR
     finally:
         try:
-            # at this point loop has been closed, so we can collect all
-            # tasks and cancel them
-            loop.run_until_complete(
-                asyncio.gather(*[
-                    session.stop(),
-                    libkirk.events.stop(),
-                ])
-            )
-            libkirk.cancel_tasks(loop)
+            loop.run_until_complete(session.stop())
         except KeyboardInterrupt:
-            pass
+            loop.run_until_complete(session.stop())
+
+        libkirk.cancel_tasks(loop)
+        loop.run_until_complete(libkirk.events.stop())
 
     parser.exit(exit_code)
 
 
-def run(cmd_args: list = None) -> None:
+def run(cmd_args: Optional[List[str]] = None) -> None:
     """
     Entry point of the application.
+
+    :param cmd_args: Command line arguments.
+    :type cmd_args: list(str) | None
     """
     currdir = os.path.dirname(os.path.realpath(__file__))
-    _discover_sut(currdir)
-    _discover_frameworks(currdir)
+
+    libkirk.com.discover(os.path.join(currdir, "channels"))
+    libkirk.sut.discover(currdir)
 
     parser = argparse.ArgumentParser(
-        description='Kirk - All-in-one Linux Testing Framework')
+        description="Kirk - All-in-one Linux Testing Framework"
+    )
 
-    generic_opts = parser.add_argument_group('General options')
+    generic_opts = parser.add_argument_group("General options")
     generic_opts.add_argument(
-        "--version",
-        "-V",
-        action="version",
-        version=f"%(prog)s, {__version__}")
+        "--version", "-V", action="version", version=f"%(prog)s, {__version__}"
+    )
     generic_opts.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Verbose mode")
+        "--verbose", "-v", action="store_true", help="Verbose mode"
+    )
     generic_opts.add_argument(
-        "--no-colors",
-        "-n",
-        action="store_true",
-        help="If defined, no colors are shown")
+        "--no-colors", "-n", action="store_true", help="If defined, no colors are shown"
+    )
     generic_opts.add_argument(
-        "--tmp-dir",
-        "-d",
-        type=str,
-        default="/tmp",
-        help="Temporary directory")
+        "--tmp-dir", "-d", type=str, default="/tmp", help="Temporary directory"
+    )
     generic_opts.add_argument(
-        "--restore",
-        "-r",
-        type=str,
-        help="Restore a specific session")
+        "--restore", "-r", type=str, help="Restore a specific session"
+    )
     generic_opts.add_argument(
-        "--json-report",
-        "-o",
-        type=str,
-        help="JSON output report")
+        "--json-report", "-o", type=str, help="JSON output report"
+    )
     generic_opts.add_argument(
-        "--monitor",
-        "-m",
-        type=str,
-        help="Location of the monitor file")
+        "--monitor", "-m", type=str, help="Location of the monitor file"
+    )
+    generic_opts.add_argument(
+        "--plugins", "-P", type=str, help="Location of custom plugins"
+    )
 
-    conf_opts = parser.add_argument_group('Configuration options')
+    conf_opts = parser.add_argument_group("Configuration options")
+    conf_opts.add_argument(
+        "--com",
+        "-C",
+        type=_com_config,
+        action="append",
+        help="Communication channel parameters. For help please use '--com help'",
+    )
     conf_opts.add_argument(
         "--sut",
         "-u",
-        default="host",
-        type=_sut_config,
-        help="System Under Test parameters. For help please use '--sut help'")
-    conf_opts.add_argument(
-        "--framework",
-        "-U",
-        default="ltp",
-        type=_framework_config,
-        help="Framework parameters. For help please use '--framework help'")
-    conf_opts.add_argument(
-        "--env",
-        "-e",
-        type=_env_config,
-        help="List of key=value environment values separated by ':'")
-    conf_opts.add_argument(
-        "--skip-tests",
-        "-s",
-        type=str,
-        help="Skip specific tests")
+        default="default",
+        type=lambda x: _dict_config(x),
+        help="System Under Test parameters. For help please use '--sut help'",
+    )
+    conf_opts.add_argument("--skip-tests", "-s", type=str, help="Skip specific tests")
     conf_opts.add_argument(
         "--skip-file",
         "-S",
         type=str,
-        help="Skip specific tests using a skip file (newline separated item)")
+        help="Skip specific tests using a skip file (newline separated item)",
+    )
 
-    exec_opts = parser.add_argument_group('Execution options')
+    exec_opts = parser.add_argument_group("Execution options")
+    exec_opts.add_argument("--run-suite", "-f", nargs="*", help="List of suites to run")
     exec_opts.add_argument(
-        "--run-suite",
-        "-f",
-        nargs="*",
-        help="List of suites to run")
-    exec_opts.add_argument(
-        "--run-pattern",
-        "-p",
-        help="Run all tests matching the regex pattern")
-    exec_opts.add_argument(
-        "--run-command",
-        "-c",
-        help="Command to run")
+        "--run-pattern", "-p", help="Run all tests matching the regex pattern"
+    )
+    exec_opts.add_argument("--run-command", "-c", help="Command to run")
     exec_opts.add_argument(
         "--suite-timeout",
         "-T",
         type=_time_config,
         default="1h",
-        help="Timeout before stopping the suite (default: 1h)")
+        help="Timeout before stopping the suite (default: 1h)",
+    )
     exec_opts.add_argument(
         "--exec-timeout",
         "-t",
         type=_time_config,
         default="1h",
-        help="Timeout before stopping a single execution (default: 1h)")
+        help="Timeout before stopping a single execution (default: 1h)",
+    )
     exec_opts.add_argument(
         "--randomize",
         "-R",
         action="store_true",
-        help="Force parallelization execution of all tests")
+        help="Randomize execution order of tests",
+    )
     exec_opts.add_argument(
         "--runtime",
         "-I",
         type=_time_config,
         default="0",
-        help="Set for how long we want to run the session in seconds")
+        help="Set for how long we want to run the session in seconds",
+    )
     exec_opts.add_argument(
         "--suite-iterate",
         "-i",
         type=_iterate_config,
         default=1,
-        help="Number of times to repeat testing suites")
+        help="Number of times to repeat testing suites",
+    )
     exec_opts.add_argument(
         "--workers",
         "-w",
         type=int,
         default=1,
-        help="Number of workers to execute tests in parallel")
+        help="Number of workers to execute tests in parallel",
+    )
     exec_opts.add_argument(
         "--force-parallel",
-        "-F",
+        "-W",
         action="store_true",
-        help="Force parallelization execution of all tests")
+        help="Force parallelization execution of all tests",
+    )
+    exec_opts.add_argument(
+        "--fault-injection",
+        "-F",
+        type=_finjection_config,
+        default=0,
+        help="Probability of failure (0-100)",
+    )
+    exec_opts.add_argument(
+        "--fault-interval",
+        type=_finterval_config,
+        default=1,
+        help="Fault injection interval (default: 1)",
+    )
+    exec_opts.add_argument(
+        "--optimize-sut",
+        "-O",
+        action="store_true",
+        help="Communicate with SUT using commands parallelization (default: false)",
+    )
+    exec_opts.add_argument(
+        "--dry-run",
+        "-D",
+        action="store_true",
+        help="Performs a dry run listing tests (no execution)",
+    )
 
     # output arguments
     # parse comand line
     args = parser.parse_args(cmd_args)
 
-    if args.sut and "help" in args.sut:
-        print(args.sut["help"])
+    if args.plugins:
+        if not os.path.isdir(args.plugins):
+            parser.error(f"'{args.plugins}' plugins directory doesn't exist")
+
+        libkirk.com.discover(args.plugins)
+        libkirk.sut.discover(args.plugins)
+
+    if args.com and any("help" in obj for obj in args.com):
+        _print_plugin_help("--com", libkirk.com.get_channels())
         parser.exit(RC_OK)
 
-    if args.framework and "help" in args.framework:
-        print(args.framework["help"])
+    if args.com and len(args.com) >= MAX_COM_INSTANCES:
+        parser.error(f"Maximum number of communication objects is {MAX_COM_INSTANCES}")
+
+    if args.sut and "help" in args.sut:
+        _print_plugin_help("--sut", libkirk.sut.get_suts())
         parser.exit(RC_OK)
 
     if args.json_report and os.path.exists(args.json_report):

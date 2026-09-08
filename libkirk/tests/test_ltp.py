@@ -1,20 +1,22 @@
 """
 Test Framework implementations.
 """
-import os
-import json
-import pytest
-from libkirk.data import Test
-from libkirk.ltp import LTPFramework
-from libkirk.host import HostSUT
 
-pytestmark = pytest.mark.asyncio
+import json
+import os
+
+import pytest
+
+from libkirk.data import Test
+from libkirk.channels.shell import ShellComChannel
+from libkirk.ltp import LTPFramework
 
 
 class TestLTPFramework:
     """
     Inherit this class to implement framework tests.
     """
+
     TESTS_NUM = 6
     SUITES_NUM = 3
 
@@ -23,7 +25,7 @@ class TestLTPFramework:
         """
         Host SUT communication object.
         """
-        obj = HostSUT()
+        obj = ShellComChannel()
         obj.setup()
 
         await obj.communicate()
@@ -31,13 +33,11 @@ class TestLTPFramework:
         await obj.stop()
 
     @pytest.fixture
-    def framework(self, tmpdir):
+    def framework(self):
         """
         LTP framework object.
         """
         fw = LTPFramework()
-        fw.setup(root=str(tmpdir))
-
         yield fw
 
     @pytest.fixture(autouse=True)
@@ -45,6 +45,8 @@ class TestLTPFramework:
         """
         Prepare the temporary directory adding runtest folder.
         """
+        os.environ["LTPROOT"] = str(tmpdir)
+
         # create simple testing suites
         content = ""
         for i in range(self.TESTS_NUM):
@@ -63,7 +65,7 @@ class TestLTPFramework:
         for i in range(self.TESTS_NUM, self.TESTS_NUM * 2):
             content += f"slow_test0{i} sleep 0.05\n"
 
-        suite = runtest / f"slow_suite"
+        suite = runtest / "slow_suite"
         suite.write(content)
 
         tests = {}
@@ -79,13 +81,7 @@ class TestLTPFramework:
         test_sh = testcases / "test.sh"
         test_sh.write("#!/bin/bash\necho $1 $2\n")
 
-    async def test_name(self, framework):
-        """
-        Test that name property is not empty.
-        """
-        assert framework.name == "ltp"
-
-    async def test_get_suites(self, framework, sut, tmpdir):
+    async def test_get_suites(self, framework, sut):
         """
         Test get_suites method.
         """
@@ -120,10 +116,7 @@ class TestLTPFramework:
                 assert test.name == f"test0{j}"
                 assert test.command == "echo"
                 assert test.arguments == ["ciao"]
-                assert test.cwd == os.path.join(
-                    str(tmpdir),
-                    "testcases",
-                    "bin")
+                assert test.cwd == os.path.join(str(tmpdir), "testcases", "bin")
                 assert not test.parallelizable
                 assert "LTPROOT" in test.env
                 assert "TMPDIR" in test.env
@@ -135,21 +128,45 @@ class TestLTPFramework:
         for test in suite.tests:
             assert test.command == "sleep"
             assert test.arguments == ["0.05"]
-            assert test.cwd == os.path.join(
-                str(tmpdir),
-                "testcases",
-                "bin")
+            assert test.cwd == os.path.join(str(tmpdir), "testcases", "bin")
             assert not test.parallelizable
             assert "LTPROOT" in test.env
             assert "TMPDIR" in test.env
             assert "LTP_COLORIZE_OUTPUT" in test.env
 
-    async def test_find_suite_max_runtime(self, sut, tmpdir):
+    async def test_find_suite_network_vars(self, sut, monkeypatch):
+        """
+        Test that all SUPPORTED_ENV variables and TST_/LTP_ prefixed variables
+        are forwarded to tests.
+        """
+        # Build a mapping of every variable that should be forwarded:
+        # all entries in SUPPORTED_ENV (skipping PATH which is always present)
+        # plus representative TST_ and LTP_ prefixed variables.
+        net_vars = {
+            key: f"test_value_{key}"
+            for key in LTPFramework.SUPPORTED_ENV
+            if key != "PATH"
+        }
+        # One representative per prefix is enough to verify prefix-based forwarding.
+        net_vars["TST_USE_NETNS"] = "yes"
+        net_vars["LTP_RSH"] = "ssh -nq"
+
+        for key, val in net_vars.items():
+            monkeypatch.setenv(key, val)
+
+        framework = LTPFramework()
+        suite = await framework.find_suite(sut, "suite0")
+
+        for test in suite.tests:
+            for key, val in net_vars.items():
+                assert key in test.env, f"{key} not found in test env"
+                assert test.env[key] == val
+
+    async def test_find_suite_max_runtime(self, sut):
         """
         Test find_suite method when max_runtime is defined.
         """
-        framework = LTPFramework()
-        framework.setup(root=str(tmpdir), max_runtime=5)
+        framework = LTPFramework(max_runtime=5)
 
         suite = await framework.find_suite(sut, "slow_suite")
         assert len(suite.tests) == 0
@@ -158,8 +175,8 @@ class TestLTPFramework:
         """
         Test read_result method when test passes.
         """
-        test = Test(name="test", cmd="echo", args="ciao")
-        result = await framework.read_result(test, 'ciao\n', 0, 0.1)
+        test = Test(name="test", cmd="echo", args=["ciao"])
+        result = await framework.read_result(test, "ciao\n", 0, 0.1)
         assert result.passed == 1
         assert result.failed == 0
         assert result.broken == 0
@@ -175,7 +192,7 @@ class TestLTPFramework:
         Test read_result method when test fails.
         """
         test = Test(name="test", cmd="echo")
-        result = await framework.read_result(test, '', 1, 0.1)
+        result = await framework.read_result(test, "", 1, 0.1)
         assert result.passed == 0
         assert result.failed == 1
         assert result.broken == 0
@@ -191,7 +208,7 @@ class TestLTPFramework:
         Test read_result method when test is broken.
         """
         test = Test(name="test", cmd="echo")
-        result = await framework.read_result(test, '', -1, 0.1)
+        result = await framework.read_result(test, "", -1, 0.1)
         assert result.passed == 0
         assert result.failed == 0
         assert result.broken == 1
@@ -207,8 +224,7 @@ class TestLTPFramework:
         Test read_result method when test has skip.
         """
         test = Test(name="test", cmd="echo")
-        result = await framework.read_result(
-            test, "mydata", 32, 0.1)
+        result = await framework.read_result(test, "mydata", 32, 0.1)
         assert result.passed == 0
         assert result.failed == 0
         assert result.broken == 0
@@ -218,3 +234,105 @@ class TestLTPFramework:
         assert result.test == test
         assert result.return_code == 32
         assert result.stdout == "mydata"
+
+    async def test_read_result_warnings(self, framework):
+        """
+        Test read_result method when test has warnings.
+        """
+        test = Test(name="test", cmd="echo")
+        result = await framework.read_result(test, "", 4, 0.1)
+        assert result.warnings == 1
+
+    async def test_read_result_with_summary(self, framework):
+        """
+        Test read_result method when stdout contains Summary block.
+        """
+        stdout = (
+            "some output\n"
+            "Summary:\n"
+            "passed   3\n"
+            "failed   1\n"
+            "broken   0\n"
+            "skipped  2\n"
+            "warnings 1\n"
+        )
+        test = Test(name="test", cmd="echo")
+        result = await framework.read_result(test, stdout, 0, 0.5)
+        assert result.passed == 3
+        assert result.failed == 1
+        assert result.broken == 0
+        assert result.skipped == 2
+        assert result.warnings == 1
+
+    async def test_read_result_tpass_markers(self, framework):
+        """
+        Test read_result when stdout has TPASS/TFAIL markers but no summary.
+        """
+        stdout = "test 1 TPASS: ok\ntest 2 TPASS: ok\ntest 3 TFAIL: bad\n"
+        test = Test(name="test", cmd="echo")
+        result = await framework.read_result(test, stdout, 1, 0.1)
+        assert result.passed == 2
+        assert result.failed == 1
+
+    async def test_get_suites_errors(self, sut):
+        """
+        Test get_suites with invalid inputs.
+        """
+        framework = LTPFramework()
+
+        with pytest.raises(ValueError):
+            # pyrefly: ignore[bad-argument-type]
+            await framework.get_suites(None)
+
+    async def test_find_command_errors(self, sut):
+        """
+        Test find_command with invalid inputs.
+        """
+        framework = LTPFramework()
+
+        with pytest.raises(ValueError):
+            # pyrefly: ignore[bad-argument-type]
+            await framework.find_command(None, "cmd")
+
+        with pytest.raises(ValueError):
+            await framework.find_command(sut, "")
+
+    async def test_find_suite_errors(self, sut):
+        """
+        Test find_suite with invalid inputs.
+        """
+        framework = LTPFramework()
+
+        with pytest.raises(ValueError):
+            # pyrefly: ignore[bad-argument-type]
+            await framework.find_suite(None, "suite")
+
+        with pytest.raises(ValueError):
+            await framework.find_suite(sut, "")
+
+    async def test_find_suite_nonexistent(self, sut):
+        """
+        Test find_suite with a nonexistent suite name.
+        """
+        from libkirk.errors import FrameworkError
+
+        framework = LTPFramework()
+        with pytest.raises(FrameworkError):
+            await framework.find_suite(sut, "nonexistent_suite_xyz")
+
+    async def test_timeout_mul_from_env(self, sut, monkeypatch, tmpdir):
+        """
+        Test that LTP_TIMEOUT_MUL from env is used.
+        """
+        monkeypatch.setenv("LTP_TIMEOUT_MUL", "2.5")
+        framework = LTPFramework()
+        assert framework._env["LTP_TIMEOUT_MUL"] == "2.5"
+
+    async def test_read_path_without_path_env(self, sut, monkeypatch):
+        """
+        Test _read_path when PATH is not in self._env.
+        """
+        framework = LTPFramework()
+        framework._env.pop("PATH", None)
+        env = await framework._read_path(sut)
+        assert "PATH" in env

@@ -5,11 +5,22 @@
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
-import os
+
 import asyncio
 import logging
-import typing
+from types import TracebackType
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Type,
+)
+
 import libkirk
+from libkirk.errors import LTXError
+from libkirk.io import AsyncFile
 
 try:
     import msgpack
@@ -17,17 +28,12 @@ except ModuleNotFoundError:
     pass
 
 
-class LTXError(Exception):
-    """
-    Raised when an error occurs during LTX execution.
-    """
-
-
 class Request:
     """
-    LTX request.
+    LTX client request.
     """
-    ERROR = 0xff
+
+    ERROR = 0xFF
     VERSION = 0x00
     PING = 0x01
     PONG = 0x02
@@ -38,8 +44,8 @@ class Request:
     EXEC = 0x07
     RESULT = 0x08
     LOG = 0x09
-    DATA = 0xa0
-    KILL = 0xa1
+    DATA = 0xA0
+    KILL = 0xA1
     MAX_SLOTS = 127
     ALL_SLOTS = 128
     MAX_ENVS = 16
@@ -52,19 +58,21 @@ class Request:
     @property
     def completed(self) -> bool:
         """
-        If True the request has been completed.
+        :return: True if request has been completed. False otherwise.
+        :rtype: bool
         """
         return self._completed
 
-    def add_done_coro(self, coro: typing.Coroutine) -> None:
+    def add_done_coro(self, coro: Callable) -> None:
         """
         Add done event to request.
-        :param coro: called when request is done
-        :type coro: Coroutine
+
+        :param coro: Called when request is completed.
+        :type coro: Callable
         """
         self._done_coro.append(coro)
 
-    async def _raise_complete(self, *args) -> None:
+    async def _raise_complete(self, *args: Any) -> None:
         """
         Raise the complete callback with given data.
         """
@@ -79,34 +87,41 @@ class Request:
     async def pack(self) -> bytes:
         """
         Pack LTX request into bytes.
+
+        :return: Request bytes.
+        :rtype: bytes
         """
         raise NotImplementedError()
 
-    async def feed(self, message: list) -> None:
+    async def feed(self, message: List[Any]) -> None:
         """
         Feed request queue with data and return when the request
         has been completed.
-        :param message: processed msgpack message
+
+        :param message: Processed msgpack message.
         :type message: list
         """
         raise NotImplementedError()
-
-# pylint: disable=invalid-name
 
 
 class Requests:
     """
     Class container for LTX requests.
     """
+
     class version(Request):
         """
         VERSION request.
         """
 
         async def pack(self) -> bytes:
-            return msgpack.packb([self.VERSION])
+            pkg = msgpack.packb([self.VERSION])
+            if not pkg:
+                raise LTXError("Can't pack VERSION request")
 
-        async def feed(self, message: list) -> None:
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -126,9 +141,13 @@ class Requests:
             self._echoed = False
 
         async def pack(self) -> bytes:
-            return msgpack.packb([self.PING])
+            pkg = msgpack.packb([self.PING])
+            if not pkg:
+                raise LTXError("Can't pack PING request")
 
-        async def feed(self, message: list) -> None:
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -152,12 +171,12 @@ class Requests:
 
         def __init__(self, slot_id: int, key: str, value: str) -> None:
             """
-            :param slot_id: command table ID. Can be None if we want to apply
-                the same environment variable to all executions
+            :param slot_id: Command table ID. Can be None if we want to apply
+                the same environment variable to all executions.
             :type slot_id: int
-            :param key: key of the environment variable
+            :param key: Key of the environment variable.
             :type key: str
-            :param value: value of the environment variable
+            :param value: Value of the environment variable.
             :type value: str
             """
             super().__init__()
@@ -176,14 +195,14 @@ class Requests:
             self._value = value
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.ENV,
-                self._slot_id,
-                self._key,
-                self._value
-            ])
+            pkg = msgpack.packb([self.ENV, self._slot_id, self._key, self._value])
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack ENV request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -192,10 +211,7 @@ class Requests:
 
             if message[0] == self.ENV:
                 self._logger.info("ENV echoed back")
-                await self._raise_complete(
-                    self._slot_id,
-                    self._key,
-                    self._value)
+                await self._raise_complete(self._slot_id, self._key, self._value)
 
     class cwd(Request):
         """
@@ -204,16 +220,15 @@ class Requests:
 
         def __init__(self, slot_id: int, path: str) -> None:
             """
-            :param slot_id: command table ID. Can be None if we want to apply
+            :param slot_id: Command table ID. Can be None if we want to apply
                 the same current working directory to all executions
             :type slot_id: int
-            :param path: current working path
+            :param path: Current working path.
             :type path: str
             """
             super().__init__()
 
-            if slot_id is not None and \
-                    (slot_id < 0 or slot_id > self.ALL_SLOTS):
+            if slot_id is not None and (slot_id < 0 or slot_id > self.ALL_SLOTS):
                 raise ValueError(f"Out of bounds slot ID [0-{self.ALL_SLOTS}]")
 
             if not path:
@@ -223,13 +238,20 @@ class Requests:
             self._path = path
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.CWD,
-                self._slot_id,
-                self._path,
-            ])
+            pkg = msgpack.packb(
+                [
+                    self.CWD,
+                    self._slot_id,
+                    self._path,
+                ]
+            )
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack CWD request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -247,7 +269,7 @@ class Requests:
 
         def __init__(self, path: str) -> None:
             """
-            :param path: path of the file to read
+            :param path: Path of the file to read.
             :type path: str
             """
             super().__init__()
@@ -259,12 +281,19 @@ class Requests:
             self._data = []
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.GET_FILE,
-                self._path,
-            ])
+            pkg = msgpack.packb(
+                [
+                    self.GET_FILE,
+                    self._path,
+                ]
+            )
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack GET_FILE request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -273,7 +302,7 @@ class Requests:
                 self._data.append(message[1])
             elif message[0] == self.GET_FILE:
                 self._logger.info("GET_FILE echoed back")
-                await self._raise_complete(self._path, b''.join(self._data))
+                await self._raise_complete(self._path, b"".join(self._data))
 
     class set_file(Request):
         """
@@ -299,13 +328,20 @@ class Requests:
             self._data = data
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.SET_FILE,
-                self._path,
-                self._data,
-            ])
+            pkg = msgpack.packb(
+                [
+                    self.SET_FILE,
+                    self._path,
+                    self._data,
+                ]
+            )
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack SET_FILE request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -319,17 +355,15 @@ class Requests:
         """
 
         def __init__(
-                self,
-                slot_id: int,
-                command: str,
-                stdout_coro: typing.Coroutine = None) -> None:
+            self, slot_id: int, command: str, stdout_coro: Optional[Callable] = None
+        ) -> None:
             """
             :param slot_id: command table ID
             :type slot_id: int
             :param command: command to run
             :type command: str
             :param stdout_coro: called when new data arrives in stdout
-            :type stdout_coro: callable
+            :type stdout_coro: Callable
             """
             super().__init__()
 
@@ -349,13 +383,20 @@ class Requests:
             self._echoed = False
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.EXEC,
-                self._slot_id,
-                self._command,
-            ])
+            pkg = msgpack.packb(
+                [
+                    self.EXEC,
+                    self._slot_id,
+                    self._command,
+                ]
+            )
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack EXEC request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -389,16 +430,10 @@ class Requests:
                 si_status = message[4]
 
                 self._logger.debug(
-                    "time_ns=%s, si_code=%s, si_status=%s",
-                    time_ns,
-                    si_code,
-                    si_status)
+                    "time_ns=%s, si_code=%s, si_status=%s", time_ns, si_code, si_status
+                )
 
-                await self._raise_complete(
-                    time_ns,
-                    si_code,
-                    si_status,
-                    stdout)
+                await self._raise_complete(time_ns, si_code, si_status, stdout)
 
     class kill(Request):
         """
@@ -421,12 +456,19 @@ class Requests:
             self._slot_id = slot_id
 
         async def pack(self) -> bytes:
-            return msgpack.packb([
-                self.KILL,
-                self._slot_id,
-            ])
+            pkg = msgpack.packb(
+                [
+                    self.KILL,
+                    self._slot_id,
+                ]
+            )
 
-        async def feed(self, message: list) -> None:
+            if not pkg:
+                raise LTXError("Can't pack KILL request")
+
+            return pkg
+
+        async def feed(self, message: List[Any]) -> None:
             if self.completed:
                 return
 
@@ -442,48 +484,57 @@ class LTX:
     """
     This class communicates with LTX by processing given requests.
     Typical usage is the following:
-    ```
-    async with LTX(stdin_fd, stdout_fd) as ltx:
-        # create requests
-        request1 = Requests.execute("echo 'hello world' > myfile")
-        request2 = Requests.get_file("myfile")
 
-        # set the complete event
-        request1.add_done_coro(exec_complete_handler)
-        request2.add_done_coro(get_file_complete_handler)
+    .. code-block:: python
 
-        # send request
-        ltx.send([request1, request2])
+        async with LTX(infile, outfile) as ltx:
+            # create requests
+            request1 = Requests.execute("echo 'hello world' > myfile")
+            request2 = Requests.get_file("myfile")
 
-        # process events output
-        ...
-    ```
+            # set the complete event
+            request1.add_done_coro(exec_complete_handler)
+            request2.add_done_coro(get_file_complete_handler)
+
+            # send request
+            ltx.send([request1, request2])
+
+            # process events output
+            ...
+
     """
+
     BUFFSIZE = 1 << 21
 
-    def __init__(self, stdin_fd: int, stdout_fd: int) -> None:
+    def __init__(self, infile: str, outfile: str) -> None:
         self._logger = logging.getLogger("ltx")
         self._requests = []
         self._stop = False
-        self._stdin_fd = stdin_fd
-        self._stdout_fd = stdout_fd
+        self._infile = infile
+        self._outfile = outfile
         self._lock = asyncio.Lock()
-        self._task = None
-        self._messages = []
-        self._exception = None
+        self._task: Optional[asyncio.Task] = None
+        self._messages = asyncio.Queue()
+        self._exception: Optional[Exception] = None
 
-    async def __aenter__(self) -> None:
+    async def __aenter__(self) -> Any:
         """
         Connect to the LTX service.
         """
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> bool:
         """
         Disconnect from LTX service.
         """
         await self.disconnect()
+        return True
 
     @property
     def connected(self) -> bool:
@@ -504,8 +555,6 @@ class LTX:
 
         self._logger.info("Connecting to LTX")
 
-        os.set_blocking(self._stdout_fd, False)
-
         self._exception = None
         self._task = libkirk.create_task(self._polling())
 
@@ -524,6 +573,9 @@ class LTX:
         self._logger.info("Disconnecting")
         self._stop = True
 
+        # send the stop message
+        await self._messages.put(None)
+
         while self.connected:
             await asyncio.sleep(0.005)
             if self._exception:
@@ -534,11 +586,12 @@ class LTX:
 
         self._logger.info("Disconnected")
 
-    async def send(self, requests: list) -> None:
+    async def send(self, requests: List[Request]) -> None:
         """
         Send requests to LTX service. The order is preserved during
         requests execution.
-        :param requests: list of requests to send
+
+        :param requests: List of requests to send.
         :type requests: list
         """
         if not requests:
@@ -552,20 +605,27 @@ class LTX:
             self._requests.extend(requests)
 
             data = [await req.pack() for req in requests]
-            tosend = b''.join(data)
+            tosend = b"".join(data)
 
-            await self._write(bytes(tosend))
+            async with AsyncFile(self._infile, "wb") as afile:
+                await afile.write(tosend)
 
-    async def gather(self, requests: list) -> dict:
+    async def gather(self, requests: List[Request]) -> Dict[Request, Any]:
         """
         Gather multiple requests and wait for the response, then return all
         rquests' replies inside a dictionary that maps requests with their
         reply.
+
+        :param requests: List of requests to process.
+        :type requests: list(Request)
+        :return: Dictionary containing Request as keys and data from completed
+            requests as values.
+        :rtype: dict
         """
         req_len = len(requests)
         replies = {}
 
-        async def on_complete(req, *args):
+        async def on_complete(req: Request, *args: List) -> None:
             replies[req] = args
 
         for req in requests:
@@ -583,75 +643,60 @@ class LTX:
 
         return replies
 
-    async def _read(self, size: int) -> bytes:
-        """
-        Blocking I/O method to read from stdout.
-        """
-        data = None
-        try:
-            data = await libkirk.to_thread(os.read, self._stdout_fd, size)
-        except BlockingIOError:
-            # we ensure other threads will take action if reading
-            # procedure is too fast for this process
-            os.sched_yield()
-
-        return data
-
-    async def _write(self, data: bytes) -> None:
-        """
-        Blocking I/O method to write on stdin.
-        """
-        towrite = len(data)
-        try:
-            wrote = await libkirk.to_thread(os.write, self._stdin_fd, data)
-
-            if towrite != wrote:
-                raise LTXError(f"Wrote {wrote} bytes but expected {towrite}")
-        except BrokenPipeError:
-            pass
-
-    # pylint: disable=too-many-nested-blocks
     async def _polling(self) -> None:
         """
-        Read and process messages coming from LTX stdout.
+        Read and process messages coming from LTX.
         """
         self._logger.info("Starting producer")
 
-        # force utf-8 encoding by using raw=False
-        unpacker = msgpack.Unpacker(raw=False)
+        with open(self._outfile, "rb", buffering=0) as afile:
+            # force utf-8 encoding by using raw=False
+            unpacker = msgpack.Unpacker(raw=False)
 
-        try:
-            while not self._stop:
-                data = await self._read(self.BUFFSIZE)
-                if not data:
-                    continue
+            def _read() -> Any:
+                """
+                Read the last available data.
+                """
+                data = afile.read(self.BUFFSIZE)
+                self._messages.put_nowait(data)
 
-                self._logger.debug("Unpacking bytes: %s", data)
+            loop = libkirk.get_event_loop()
+            # pyrefly: ignore[bad-argument-type]
+            loop.add_reader(afile.fileno(), _read)
 
-                unpacker.feed(data)
-
-                while True:
-                    try:
-                        msg = unpacker.unpack()
-                        if not msg:
-                            continue
-
-                        self._logger.info("Received message: %s", msg)
-                        if not isinstance(msg, list):
-                            raise LTXError("Message must be an array")
-
-                        if msg[0] == Request.ERROR:
-                            raise LTXError(msg[1])
-
-                        await self._feed_requests(msg)
-                    except msgpack.OutOfData:
+            try:
+                while not self._stop:
+                    data = await self._messages.get()
+                    if not data:
                         break
-        except LTXError as err:
-            self._exception = err
-        finally:
-            self._logger.info("Producer has stopped")
 
-    async def _feed_requests(self, data: list) -> None:
+                    self._logger.debug("Unpacking bytes: %s", data)
+
+                    unpacker.feed(data)
+
+                    while True:
+                        try:
+                            msg = unpacker.unpack()
+                            if not msg:
+                                continue
+
+                            self._logger.info("Received message: %s", msg)
+                            if not isinstance(msg, list):
+                                raise LTXError("Message must be an array")
+
+                            if msg[0] == Request.ERROR:
+                                raise LTXError(msg[1])
+
+                            await self._feed_requests(msg)
+                        except msgpack.OutOfData:
+                            break
+            except LTXError as err:
+                loop.remove_reader(afile.fileno())
+                self._exception = err
+            finally:
+                self._logger.info("Producer has stopped")
+
+    async def _feed_requests(self, data: List[Request]) -> None:
         """
         Feed the list of requests with given data.
         """

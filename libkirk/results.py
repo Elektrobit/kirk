@@ -1,12 +1,20 @@
 """
-.. module:: data
+.. module:: results
     :platform: Linux
     :synopsis: module containing suites data definition
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
-from libkirk.data import Test
-from libkirk.data import Suite
+
+from typing import (
+    List,
+    Optional,
+)
+
+from libkirk.data import (
+    Suite,
+    Test,
+)
 
 
 class ResultStatus:
@@ -16,20 +24,31 @@ class ResultStatus:
     inside a single test binary, but the overall status of the test is fine, so
     we assign a PASS status.
     """
-    # regular test run
+
     PASS = 0
+    """
+    Test has passed.
+    """
 
-    # test broken result
     BROK = 2
+    """
+    Test is broken.
+    """
 
-    # test warns
     WARN = 4
+    """
+    Test warnings received.
+    """
 
-    # test failure
     FAIL = 16
+    """
+    Test has failed.
+    """
 
-    # test configuration error
     CONF = 32
+    """
+    Test can't run because of configuration error.
+    """
 
 
 class Results:
@@ -40,48 +59,48 @@ class Results:
     @property
     def exec_time(self) -> float:
         """
-        Execution time.
-        :returns: float
+        :return: Test execution time in seconds.
+        :rtype: float
         """
         raise NotImplementedError()
 
     @property
     def failed(self) -> int:
         """
-        Number of TFAIL.
-        :returns: int
+        :return: Number of failures.
+        :rtype: int
         """
         raise NotImplementedError()
 
     @property
     def passed(self) -> int:
         """
-        Number of TPASS.
-        :returns: int
+        :return: Number of passed tests.
+        :rtype: int
         """
         raise NotImplementedError()
 
     @property
     def broken(self) -> int:
         """
-        Number of TBROK.
-        :returns: int
+        :return: Number of broken tests.
+        :rtype: int
         """
         raise NotImplementedError()
 
     @property
     def skipped(self) -> int:
         """
-        Number of TSKIP.
-        :returns: int
+        :return: Number of skipped tests.
+        :rtype: int
         """
         raise NotImplementedError()
 
     @property
     def warnings(self) -> int:
         """
-        Number of TWARN.
-        :returns: int
+        :return: Number of warnings.
+        :rtype: int
         """
         raise NotImplementedError()
 
@@ -91,91 +110,104 @@ class TestResults(Results):
     Test results definition.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self,
+        test: Test,
+        failed: int = 0,
+        passed: int = 0,
+        broken: int = 0,
+        skipped: int = 0,
+        warnings: int = 0,
+        exec_time: float = 0.0,
+        status: int = ResultStatus.PASS,
+        retcode: int = 0,
+        stdout: str = "",
+    ) -> None:
         """
-        :param test: Test object declaration
+        :param test: Test object declaration.
         :type test: Test
-        :param failed: number of TFAIL
+        :param failed: number of TFAIL.
         :type failed: int
-        :param passed: number of TPASS
+        :param passed: number of TPASS.
         :type passed: int
-        :param broken: number of TBROK
+        :param broken: number of TBROK.
         :type broken: int
-        :param skipped: number of TSKIP
+        :param skipped: number of TSKIP.
         :type skipped: int
-        :param warnings: number of TWARN
+        :param warnings: number of TWARN.
         :type warnings: int
-        :param exec_time: time for test's execution
+        :param exec_time: Time for test's execution.
         :type exec_time: float
-        :param status: overall status of the test
+        :param status: Overall status of the test.
         :type status: int
-        :param retcode: return code of the executed test
+        :param retcode: Return code of the executed test.
         :type retcode: int
-        :param stdout: stdout of the test
+        :param stdout: Stdout of the test.
         :type stdout: str
         """
-        self._test = kwargs.get("test", None)
-        self._failed = max(kwargs.get("failed", 0), 0)
-        self._passed = max(kwargs.get("passed", 0), 0)
-        self._broken = max(kwargs.get("broken", 0), 0)
-        self._skipped = max(kwargs.get("skipped", 0), 0)
-        self._warns = max(kwargs.get("warnings", 0), 0)
-        self._exec_t = max(kwargs.get("exec_time", 0.0), 0.0)
-        self._retcode = kwargs.get("retcode", 0)
-        self._status = kwargs.get("status", ResultStatus.PASS)
-        self._stdout = kwargs.get("stdout", None)
-
-        if not self._test:
+        if not test:
             raise ValueError("Empty test object")
 
+        self._test = test
+        self._failed = failed
+        self._passed = passed
+        self._broken = broken
+        self._skipped = skipped
+        self._warns = warnings
+        self._exec_time = exec_time
+        self._status = status
+        self._retcode = retcode
+        self._stdout = stdout
+
     def __repr__(self) -> str:
-        return \
-            f"test: '{self._test}', " \
-            f"failed: '{self._failed}', " \
-            f"passed: {self._passed}, " \
-            f"broken: {self._broken}, " \
-            f"skipped: {self._skipped}, " \
-            f"warnins: {self._warns}, " \
-            f"status: {self._status}, " \
-            f"exec_time: {self._exec_t}, " \
-            f"retcode: {self._retcode}, " \
+        return (
+            f"test: '{self._test}', "
+            f"failed: '{self._failed}', "
+            f"passed: {self._passed}, "
+            f"broken: {self._broken}, "
+            f"skipped: {self._skipped}, "
+            f"warnings: {self._warns}, "
+            f"exec_time: {self._exec_time}, "
+            f"status: {self._status}, "
+            f"retcode: {self._retcode}, "
             f"stdout: {repr(self._stdout)}"
+        )
 
     @property
     def test(self) -> Test:
         """
-        Test object declaration.
-        :returns: Test
+        :return: Test object.
+        :rtype: Test
         """
         return self._test
 
     @property
     def return_code(self) -> int:
         """
-        Return code after execution.
-        :returns: int
+        :return: Return code after execution.
+        :rtype: int
         """
         return self._retcode
 
     @property
     def stdout(self) -> str:
         """
-        Return the ending stdout.
-        :returns: str
+        :return: Test process stdout.
+        :rtype: str
         """
         return self._stdout
 
     @property
     def status(self) -> int:
         """
-        Overall test result status.
-        :returns: int
+        :return: Test result status.
+        :rtype: int
         """
         return self._status
 
     @property
     def exec_time(self) -> float:
-        return self._exec_t
+        return self._exec_time
 
     @property
     def failed(self) -> int:
@@ -203,59 +235,82 @@ class SuiteResults(Results):
     Testing suite results definition.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self,
+        suite: Suite,
+        tests: Optional[List[TestResults]] = None,
+        distro: Optional[str] = None,
+        distro_ver: Optional[str] = None,
+        kernel: Optional[str] = None,
+        cmdline: Optional[str] = None,
+        arch: Optional[str] = None,
+        cpu: Optional[str] = None,
+        swap: Optional[str] = None,
+        ram: Optional[str] = None,
+    ) -> None:
         """
-        :param suite: Test object declaration
+        :param suite: Test object declaration.
         :type suite: Suite
-        :param tests: List of the tests results
+        :param tests: List of the tests results.
         :type tests: list(TestResults)
-        :param distro: distribution name
+        :param distro: Distribution name.
         :type distro: str
-        :param distro_ver: distribution version
+        :param distro_ver: Distribution version.
         :type distro_ver: str
-        :param kernel: kernel version
+        :param kernel: Kernel version.
         :type kernel: str
-        :param arch: OS architecture
+        :param cmdline: /proc/cmdline.
+        :type cmdline: str
+        :param arch: OS architecture.
         :type arch: str
+        :param cpu: CPU type info.
+        :type cpu: str
+        :param swap: Swap memory info.
+        :type swap: str
+        :param ram: RAM info.
+        :type ram: str
         """
-        self._suite = kwargs.get("suite", None)
-        self._tests = kwargs.get("tests", [])
-        self._distro = kwargs.get("distro", None)
-        self._distro_ver = kwargs.get("distro_ver", None)
-        self._kernel = kwargs.get("kernel", None)
-        self._arch = kwargs.get("arch", None)
-        self._cpu = kwargs.get("cpu", None)
-        self._swap = kwargs.get("swap", None)
-        self._ram = kwargs.get("ram", None)
-
-        if not self._suite:
+        if not suite:
             raise ValueError("Empty suite object")
 
+        self._suite = suite
+        self._tests = tests if tests is not None else []
+        self._distro = distro
+        self._distro_ver = distro_ver
+        self._kernel = kernel
+        self._cmdline = cmdline
+        self._arch = arch
+        self._cpu = cpu
+        self._swap = swap
+        self._ram = ram
+
     def __repr__(self) -> str:
-        return \
-            f"suite: '{self._suite}', " \
-            f"tests: '{self._tests}', " \
-            f"distro: {self._distro}, " \
-            f"distro_ver: {self._distro_ver}, " \
-            f"kernel: {self._kernel}, " \
-            f"arch: {self._arch}, " \
-            f"cpu: {self._cpu}, " \
-            f"swap: {self._swap}, " \
+        return (
+            f"suite: '{self._suite}', "
+            f"tests: '{self._tests}', "
+            f"distro: {self._distro}, "
+            f"distro_ver: {self._distro_ver}, "
+            f"kernel: {self._kernel}, "
+            f"cmdline: {self._cmdline}, "
+            f"arch: {self._arch}, "
+            f"cpu: {self._cpu}, "
+            f"swap: {self._swap}, "
             f"ram: {self._ram}"
+        )
 
     @property
     def suite(self) -> Suite:
         """
-        Suite object declaration.
-        :returns: Suite
+        :returns: Testing suite.
+        :rtype: Suite
         """
         return self._suite
 
     @property
-    def tests_results(self) -> list:
+    def tests_results(self) -> List[TestResults]:
         """
-        Results of all tests.
-        :returns: list(TestResults)
+        :returns: list of all tests results.
+        :rtype: list(TestResults)
         """
         return self._tests
 
@@ -270,51 +325,66 @@ class SuiteResults(Results):
         return res
 
     @property
-    def distro(self) -> str:
+    def distro(self) -> Optional[str]:
         """
-        Distribution name.
+        :return: Linux distribution name.
+        :rtype: str | None
         """
         return self._distro
 
     @property
-    def distro_ver(self) -> str:
+    def distro_ver(self) -> Optional[str]:
         """
-        Distribution version.
+        :return: Linux distribution version.
+        :rtype: str | None
         """
         return self._distro_ver
 
     @property
-    def kernel(self) -> str:
+    def kernel(self) -> Optional[str]:
         """
-        Kernel version.
+        :return: Kernel version.
+        :rtype: str | None
         """
         return self._kernel
 
     @property
-    def arch(self) -> str:
+    def cmdline(self) -> Optional[str]:
         """
-        Operating system architecture.
+        :return: /proc/cmdline.
+        :rtype: str | None
+        """
+        return self._cmdline
+
+    @property
+    def arch(self) -> Optional[str]:
+        """
+        :return: Operating system architecture.
+        :rtype: str | None
         """
         return self._arch
 
     @property
-    def cpu(self) -> str:
+    def cpu(self) -> Optional[str]:
         """
-        Current CPU type.
+        :return: Current CPU type.
+        :rtype: str | None
         """
         return self._cpu
 
     @property
-    def swap(self) -> str:
+    def swap(self) -> Optional[str]:
         """
-        Current swap memory occupation.
+        :return: Current swap memory occupation.
+        :rtype: str | None
         """
         return self._swap
 
     @property
-    def ram(self) -> str:
+    def ram(self) -> Optional[str]:
         """
-        Current RAM occupation.
+        :return: Current RAM occupation.
+        :rtype: str | None
         """
         return self._ram
 

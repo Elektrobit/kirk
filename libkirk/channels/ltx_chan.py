@@ -1,85 +1,93 @@
 """
-.. module:: ltx
+.. module:: ltx_chan
     :platform: Linux
-    :synopsis: module containing LTX communication class
+    :synopsis: module containing LTX communication channel
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
+
+import asyncio
+import importlib.util
+import logging
 import os
 import time
-import asyncio
-import logging
-import importlib
-from libkirk.sut import SUT
-from libkirk.sut import SUTError
-from libkirk.sut import IOBuffer
-from libkirk.ltx import Request
-from libkirk.ltx import Requests
-from libkirk.ltx import LTX
-from libkirk.ltx import LTXError
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+)
+
+import libkirk.types
+from libkirk.channels.ltx import (
+    LTX,
+    Request,
+    Requests,
+)
+from libkirk.com import (
+    ComChannel,
+    IOBuffer,
+)
+from libkirk.errors import (
+    CommunicationError,
+    LTXError,
+)
 
 
-class LTXSUT(SUT):
+class LTXComChannel(ComChannel):
     """
-    A SUT using LTX as executor.
+    Communication channel using LTX as executor.
     """
+
+    _name = "ltx"
 
     def __init__(self) -> None:
         self._logger = logging.getLogger("kirk.ltx")
         self._release_lock = asyncio.Lock()
         self._fetch_lock = asyncio.Lock()
-        self._stdout = ''
-        self._stdin = ''
-        self._stdout_fd = -1
-        self._stdin_fd = -1
-        self._tmpdir = None
-        self._ltx = None
+        self._ltx: Optional[LTX] = None
+        self._outfile = ""
+        self._infile = ""
         self._slots = []
 
     @property
-    def name(self) -> str:
-        return "ltx"
-
-    @property
-    def config_help(self) -> dict:
+    def config_help(self) -> Dict[str, str]:
         return {
-            "stdin": "transport stdin file",
-            "stdout": "transport stdout file",
+            "infile": "file where ltx is reading data",
+            "outfile": "file where ltx is writing data",
         }
 
-    def setup(self, **kwargs: dict) -> None:
-        if not importlib.util.find_spec('msgpack'):
-            raise SUTError("'msgpack' library is not available")
+    def setup(self, **kwargs: Dict[str, Any]) -> None:
+        if not importlib.util.find_spec("msgpack"):
+            raise CommunicationError("'msgpack' library is not available")
 
-        self._logger.info("Initialize SUT")
+        self._logger.info("Initialize LTX channel")
 
-        self._tmpdir = kwargs.get("tmpdir", None)
-        self._stdin = kwargs.get("stdin", None)
-        self._stdout = kwargs.get("stdout", None)
+        self._infile = libkirk.types.dict_item(kwargs, "infile", str)
+        self._outfile = libkirk.types.dict_item(kwargs, "outfile", str)
 
-        if not os.path.exists(self._stdin):
-            raise SUTError(f"'{self._stdin}' stdin file doesn't exist")
+        if not self._infile or not os.path.exists(self._infile):
+            raise CommunicationError(f"'{self._infile}' input file doesn't exist")
 
-        if not os.path.exists(self._stdout):
-            raise SUTError(f"'{self._stdout}' stdout file doesn't exist")
+        if not self._outfile or not os.path.exists(self._outfile):
+            raise CommunicationError(f"'{self._outfile}' output file doesn't exist")
 
     @property
     def parallel_execution(self) -> bool:
         return True
 
-    @property
-    async def is_running(self) -> bool:
-        if self._ltx:
-            return self._ltx.connected
+    async def active(self) -> bool:
+        if not self._ltx:
+            return False
 
-        return False
+        return self._ltx.connected
 
-    async def stop(self, iobuffer: IOBuffer = None) -> None:
-        if not await self.is_running:
+    async def stop(self, iobuffer: Optional[IOBuffer] = None) -> None:
+        if not await self.active():
             return
 
         if self._slots:
-            requests = []
+            requests: List[Request] = []
             for slot_id in self._slots:
                 requests.append(Requests.kill(slot_id))
 
@@ -90,34 +98,24 @@ class LTXSUT(SUT):
                     await asyncio.sleep(1e-2)
 
         try:
+            # pyrefly: ignore[missing-attribute]
             await self._ltx.disconnect()
         except LTXError as err:
-            raise SUTError(err)
+            raise CommunicationError(err) from err
 
-        while await self.is_running:
+        while await self.active():
             await asyncio.sleep(1e-2)
 
-        try:
-            if self._stdin_fd != -1:
-                os.close(self._stdin_fd)
-
-            if self._stdout_fd != -1:
-                os.close(self._stdout_fd)
-        except OSError as err:
-            # LTX can exit before we close file, so we skip
-            # 'Bad file descriptor' error message
-            if err.errno == 9:
-                pass
-
-    async def _send_requests(self, requests: list) -> list:
+    async def _send_requests(self, requests: List[Request]) -> Dict[Request, Any]:
         """
         Send requests and check for LTXError.
         """
         reply = None
         try:
+            # pyrefly: ignore[missing-attribute]
             reply = await self._ltx.gather(requests)
         except LTXError as err:
-            raise SUTError(err)
+            raise CommunicationError(err) from err
 
         return reply
 
@@ -133,7 +131,7 @@ class LTXSUT(SUT):
                     break
 
             if slot_id == -1:
-                raise SUTError("No execution slots available")
+                raise CommunicationError("No execution slots available")
 
             self._slots.append(slot_id)
 
@@ -143,12 +141,13 @@ class LTXSUT(SUT):
         """
         Release an execution slot.
         """
-        if slot_id in self._slots:
-            self._slots.remove(slot_id)
+        async with self._release_lock:
+            if slot_id in self._slots:
+                self._slots.remove(slot_id)
 
     async def ping(self) -> float:
-        if not await self.is_running:
-            raise SUTError("SUT is not running")
+        if not await self.active():
+            raise CommunicationError("LTX is not running")
 
         req = Requests.ping()
         start_t = time.monotonic()
@@ -156,33 +155,31 @@ class LTXSUT(SUT):
 
         return (replies[req][0] * 1e-9) - start_t
 
-    async def communicate(self, iobuffer: IOBuffer = None) -> None:
-        if await self.is_running:
-            raise SUTError("SUT is already running")
+    async def communicate(self, iobuffer: Optional[IOBuffer] = None) -> None:
+        if await self.active():
+            raise CommunicationError("LTX is already running")
 
-        self._stdin_fd = os.open(self._stdin, os.O_WRONLY)
-        self._stdout_fd = os.open(self._stdout, os.O_RDONLY)
-
-        self._ltx = LTX(self._stdin_fd, self._stdout_fd)
+        self._ltx = LTX(self._infile, self._outfile)
 
         try:
             await self._ltx.connect()
         except LTXError as err:
-            raise SUTError(err)
+            raise CommunicationError(err) from err
 
         await self._send_requests([Requests.version()])
 
     async def run_command(
-            self,
-            command: str,
-            cwd: str = None,
-            env: dict = None,
-            iobuffer: IOBuffer = None) -> dict:
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        iobuffer: Optional[IOBuffer] = None,
+    ) -> Optional[Dict[str, Any]]:
         if not command:
             raise ValueError("command is empty")
 
-        if not await self.is_running:
-            raise SUTError("SUT is not running")
+        if not await self.active():
+            raise CommunicationError("LTX is not running")
 
         self._logger.info("Running command: %s", repr(command))
 
@@ -192,7 +189,7 @@ class LTXSUT(SUT):
         try:
             start_t = time.monotonic()
 
-            requests = []
+            requests: List[Request] = []
             if cwd:
                 requests.append(Requests.cwd(slot_id, cwd))
 
@@ -200,14 +197,11 @@ class LTXSUT(SUT):
                 for key, value in env.items():
                     requests.append(Requests.env(slot_id, key, value))
 
-            async def _stdout_coro(data):
+            async def _stdout_coro(data: str) -> None:
                 if iobuffer:
                     await iobuffer.write(data)
 
-            exec_req = Requests.execute(
-                slot_id,
-                command,
-                stdout_coro=_stdout_coro)
+            exec_req = Requests.execute(slot_id, command, stdout_coro=_stdout_coro)
 
             requests.append(exec_req)
             replies = await self._send_requests(requests)
@@ -232,8 +226,8 @@ class LTXSUT(SUT):
         if not target_path:
             raise ValueError("target path is empty")
 
-        if not await self.is_running:
-            raise SUTError("SSH connection is not present")
+        if not await self.active():
+            raise CommunicationError("LTX connection is not present")
 
         async with self._fetch_lock:
             req = Requests.get_file(target_path)

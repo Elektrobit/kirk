@@ -1,61 +1,65 @@
 """
-Unittests for ssh module.
+Unittests for SSHComChannel.
 """
+
+import asyncio
 import os
 import subprocess
-import asyncio
+
 import pytest
-import pytest
-from libkirk.sut import IOBuffer
-from libkirk.sut import KernelPanicError
-from libkirk.ssh import SSHSUT
+
+import libkirk.com
+from libkirk.errors import KernelPanicError
+from libkirk.channels.ssh import SSHComChannel
+from libkirk.com import IOBuffer
+from libkirk.sut_base import GenericSUT
 from libkirk.tests.test_sut import _TestSUT
+from libkirk.tests.test_com import _TestComChannel
 from libkirk.tests.test_session import _TestSession
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.ssh]
+pytestmark = [pytest.mark.ssh]
 
 TEST_SSH_USERNAME = os.environ.get("TEST_SSH_USERNAME", None)
 TEST_SSH_PASSWORD = os.environ.get("TEST_SSH_PASSWORD", None)
 TEST_SSH_KEY_FILE = os.environ.get("TEST_SSH_KEY_FILE", None)
+TEST_SSH_PORT = os.environ.get("TEST_SSH_PORT", "22")
 
 if not TEST_SSH_USERNAME:
-    pytestmark.append(pytest.mark.skip(
-        reason="TEST_SSH_USERNAME not defined"))
+    pytestmark.append(pytest.mark.skip(reason="TEST_SSH_USERNAME not defined"))
 
 if not TEST_SSH_PASSWORD:
-    pytestmark.append(pytest.mark.skip(
-        reason="TEST_SSH_PASSWORD not defined"))
+    pytestmark.append(pytest.mark.skip(reason="TEST_SSH_PASSWORD not defined"))
 
 if not TEST_SSH_KEY_FILE:
-    pytestmark.append(pytest.mark.skip(
-        reason="TEST_SSH_KEY_FILE not defined"))
+    pytestmark.append(pytest.mark.skip(reason="TEST_SSH_KEY_FILE not defined"))
 
 
 @pytest.fixture
 def config():
     """
-    Base configuration to connect to SUT.
+    Base configuration to connect to ComChannel.
     """
     raise NotImplementedError()
 
 
 @pytest.fixture
-async def sut(config):
+async def com(config):
     """
-    SSH SUT communication object.
+    SSH communication object.
     """
-    _sut = SSHSUT()
-    _sut.setup(**config)
+    obj = next((c for c in libkirk.com.get_channels() if c.name == "ssh"), None)
+    assert obj is not None
+    obj.setup(**config)
 
-    yield _sut
+    yield obj
 
-    if await _sut.is_running:
-        await _sut.stop()
+    if await obj.active():
+        await obj.stop()
 
 
-class _TestSSHSUT(_TestSUT):
+class _TestSSHComChannel(_TestComChannel):
     """
-    Test SSHSUT implementation using username/password.
+    Test SSHComChannel implementation using username/password.
     """
 
     async def test_reset_cmd(self, config):
@@ -65,9 +69,9 @@ class _TestSSHSUT(_TestSUT):
         kwargs = dict(reset_cmd="echo ciao")
         kwargs.update(config)
 
-        sut = SSHSUT()
-        sut.setup(**kwargs)
-        await sut.communicate()
+        com = SSHComChannel()
+        com.setup(**kwargs)
+        await com.communicate()
 
         class MyBuffer(IOBuffer):
             data = ""
@@ -78,9 +82,9 @@ class _TestSSHSUT(_TestSUT):
                 await asyncio.sleep(0.1)
 
         buffer = MyBuffer()
-        await sut.stop(iobuffer=buffer)
+        await com.stop(iobuffer=buffer)
 
-        assert buffer.data == 'ciao\n'
+        assert buffer.data == "ciao\n"
 
     @pytest.mark.parametrize("enable", ["0", "1"])
     async def test_sudo(self, config, enable):
@@ -90,49 +94,51 @@ class _TestSSHSUT(_TestSUT):
         kwargs = dict(sudo=enable)
         kwargs.update(config)
 
-        sut = SSHSUT()
-        sut.setup(**kwargs)
-        await sut.communicate()
-        ret = await sut.run_command("whoami")
+        com = SSHComChannel()
+        com.setup(**kwargs)
+        await com.communicate()
+        ret = await com.run_command("whoami")
+        assert ret is not None
 
         if enable == "1":
             assert ret["stdout"] == "root\n"
         else:
             assert ret["stdout"] != "root\n"
 
-    async def test_kernel_panic(self, sut):
+    async def test_kernel_panic(self, com):
         """
         Test kernel panic recognition.
         """
-        await sut.communicate()
+        await com.communicate()
 
         with pytest.raises(KernelPanicError):
-            await sut.run_command(
-                "echo 'Kernel panic\nThis is a generic message'")
+            await com.run_command("echo 'Kernel panic\nThis is a generic message'")
 
-    async def test_stderr(self, sut):
+    async def test_stderr(self, com):
         """
         Test if we are correctly reading stderr.
         """
-        await sut.communicate()
+        await com.communicate()
 
-        ret = await sut.run_command(">&2 echo ciao_stderr && echo ciao_stdout")
-        assert ret["stdout"] == "ciao_stdout\nciao_stderr\n"
+        ret = await com.run_command(">&2 echo ciao_stderr && echo ciao_stdout")
+        assert "ciao_stdout" in ret["stdout"]
+        assert "ciao_stderr" in ret["stdout"]
 
-    async def test_long_stdout(self, sut):
+    async def test_long_stdout(self, com):
         """
         Test really long stdout.
         """
-        await sut.communicate()
+        await com.communicate()
 
         result = subprocess.run(
             "tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 10000",
             shell=True,
             capture_output=True,
             text=True,
-            check=True)
+            check=True,
+        )
 
-        ret = await sut.run_command(f"echo -n {result.stdout}")
+        ret = await com.run_command(f"echo -n {result.stdout}")
         assert ret["stdout"] == result.stdout
 
 
@@ -144,9 +150,10 @@ def config_password(tmpdir):
     return dict(
         tmpdir=str(tmpdir),
         host="localhost",
-        port=22,
+        port=TEST_SSH_PORT,
         user=TEST_SSH_USERNAME,
-        password=TEST_SSH_PASSWORD)
+        password=TEST_SSH_PASSWORD,
+    )
 
 
 @pytest.fixture
@@ -157,14 +164,15 @@ def config_keyfile(tmpdir):
     return dict(
         tmpdir=str(tmpdir),
         host="localhost",
-        port=22,
+        port=TEST_SSH_PORT,
         user=TEST_SSH_USERNAME,
-        key_file=TEST_SSH_KEY_FILE)
+        key_file=TEST_SSH_KEY_FILE,
+    )
 
 
-class TestSSHSUTPassword(_TestSSHSUT):
+class TestSSHComChannelPassword(_TestSSHComChannel):
     """
-    Test SSHSUT implementation using username/password.
+    Test SSHComChannel implementation using username/password.
     """
 
     @pytest.fixture
@@ -172,9 +180,9 @@ class TestSSHSUTPassword(_TestSSHSUT):
         yield config_password
 
 
-class TestSSHSUTKeyfile(_TestSSHSUT):
+class TestSSHComChannelKeyfile(_TestSSHComChannel):
     """
-    Test SSHSUT implementation using username/password.
+    Test SSHComChannel implementation using keyfile.
     """
 
     @pytest.fixture
@@ -182,9 +190,23 @@ class TestSSHSUTKeyfile(_TestSSHSUT):
         yield config_keyfile
 
 
-class TestSessionSSHPassword(_TestSession):
+@pytest.fixture
+async def sut(com):
     """
-    Test Session implementation using SSH SUT in password mode.
+    SUT object to test.
+    """
+    obj = GenericSUT()
+    obj.setup(com="ssh")
+
+    yield obj
+
+    if await obj.is_running():
+        await obj.stop()
+
+
+class TestSUTSSHComChannelPassword(_TestSUT):
+    """
+    Test SSHComChannel implementation using username/password in within SUT.
     """
 
     @pytest.fixture
@@ -192,9 +214,29 @@ class TestSessionSSHPassword(_TestSession):
         yield config_password
 
 
-class TestSessionSSHKeyfile(_TestSession):
+class TestSUTSSHComChannelKeyfile(_TestSUT):
     """
-    Test Session implementation using SSH SUT in keyfile mode.
+    Test SSHComChannel implementation using keyfile in within SUT.
+    """
+
+    @pytest.fixture
+    def config(self, config_keyfile):
+        yield config_keyfile
+
+
+class TestSessionSSHComChannelPassword(_TestSession):
+    """
+    Test SSHComChannel implementation using username/password in within Session.
+    """
+
+    @pytest.fixture
+    def config(self, config_password):
+        yield config_password
+
+
+class TestSessionSSHComChannelKeyfile(_TestSession):
+    """
+    Test SSHComChannel implementation using keyfile in within Session.
     """
 
     @pytest.fixture

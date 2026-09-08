@@ -5,75 +5,77 @@
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
-from libkirk import KirkException
-from libkirk.sut import SUT
-from libkirk.data import Test
-from libkirk.data import Suite
-from libkirk.plugin import Plugin
+
+from typing import List
+
+from libkirk.com import ComChannel
+from libkirk.data import (
+    Suite,
+    Test,
+)
 from libkirk.results import TestResults
 
 
-class FrameworkError(KirkException):
-    """
-    A generic framework exception.
-    """
-
-
-class Framework(Plugin):
+class Framework:
     """
     Framework definition. Implement this class if you need to support more
     testing frameworks inside the application.
     """
 
-    async def get_suites(self, sut: SUT) -> list:
+    async def get_suites(self, channel: ComChannel) -> List[str]:
         """
-        Return the list of available suites inside SUT.
-        :param sut: SUT object to communicate with
-        :type sut: SUT
-        :returns: list
+        Return the list of available suites.
+
+        :param channel: Communication channel.
+        :type channel: ComChannel
+        :return: List of suites names.
+        :rtype: list(str)
         """
         raise NotImplementedError()
 
-    async def find_command(self, sut: SUT, command: str) -> Test:
+    async def find_command(self, channel: ComChannel, command: str) -> Test:
         """
         Search for command inside Framework folder and, if it's not found,
-        search for command in the operating system. Then return a Test object
-        which can be used to execute command.
-        :param sut: SUT object to communicate with
-        :type sut: SUT
-        :param command: command to execute
+        search for command in the SUT. Then return a Test object which can be
+        used to execute command.
+
+        :param channel: Communication channel.
+        :type channel: ComChannel
+        :param command: Command to execute.
         :type command: str
-        :returns: Test
+        :return: Test object that has been found.
+        :rtype: Test
         """
         raise NotImplementedError()
 
-    async def find_suite(self, sut: SUT, name: str) -> Suite:
+    async def find_suite(self, channel: ComChannel, name: str) -> Suite:
         """
-        Search for suite with given name inside SUT.
-        :param sut: SUT object to communicate with
-        :type sut: SUT
-        :param suite: name of the suite
+        Search for suite with given name inside the SUT.
+
+        :param channel: Communication channel.
+        :type channel: ComChannel
+        :param suite: Name of the suite.
         :type suite: str
-        :returns: Suite
+        :return: Suite object that has been found.
+        :rtype: Suite
         """
         raise NotImplementedError()
 
     async def read_result(
-            self,
-            test: Test,
-            stdout: str,
-            retcode: int,
-            exec_t: float) -> TestResults:
+        self, test: Test, stdout: str, retcode: int, exec_t: float
+    ) -> TestResults:
         """
         Return test results accoding with runner output and Test definition.
-        :param test: Test definition object
+
+        :param test: Test definition object.
         :type test: Test
-        :param stdout: test stdout
+        :param stdout: Test stdout.
         :type stdout: str
-        :param retcode: test return code
+        :param retcode: Test return code.
         :type retcode: int
-        :param exec_t: test execution time in seconds
+        :param exec_t: Test execution time in seconds.
         :type exec_t: float
-        :returns: TestResults
+        :return: Test results.
+        :rtype: TestResults
         """
         raise NotImplementedError()

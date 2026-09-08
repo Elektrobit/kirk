@@ -1,16 +1,15 @@
 """
 Unit tests for Exporter implementations.
 """
-import json
+
 import asyncio
+import json
+
 import pytest
-from libkirk.data import Test
-from libkirk.data import Suite
-from libkirk.results import SuiteResults, TestResults, ResultStatus
+
+from libkirk.data import Suite, Test
 from libkirk.export import JSONExporter
-
-
-pytestmark = pytest.mark.asyncio
+from libkirk.results import ResultStatus, SuiteResults, TestResults
 
 
 class TestJSONExporter:
@@ -28,9 +27,11 @@ class TestJSONExporter:
             await exporter.save_file(list(), "")
 
         with pytest.raises(ValueError):
+            # pyrefly: ignore[bad-argument-type]
             await exporter.save_file(None, "")
 
         with pytest.raises(ValueError):
+            # pyrefly: ignore[bad-argument-type]
             await exporter.save_file([0, 1], None)
 
     async def test_save_file(self, tmpdir):
@@ -41,7 +42,7 @@ class TestJSONExporter:
         tests = [
             Test(name="ls0", cmd="ls"),
             Test(name="ls1", cmd="ls", args=["-l"]),
-            Test(name="ls2", cmd="ls", args=["--error"])
+            Test(name="ls2", cmd="ls", args=["--error"]),
         ]
         suite0 = Suite("ls_suite0", tests)
 
@@ -92,11 +93,12 @@ class TestJSONExporter:
                 distro="openSUSE-Leap",
                 distro_ver="15.3",
                 kernel="5.17",
+                cmdline="security=selinux selinux=1 enforcing=1 ima_policy=tcb",
                 arch="x86_64",
                 cpu="x86_64",
                 swap="10 kB",
                 ram="1000 kB",
-                exec_time=3),
+            ),
         ]
 
         exporter = JSONExporter()
@@ -112,7 +114,7 @@ class TestJSONExporter:
             data = None
 
             output = tmpdir / f"output{i}.json"
-            with open(str(output), 'r') as json_data:
+            with open(str(output), "r") as json_data:
                 data = json.load(json_data)
 
             assert len(data["results"]) == 3
@@ -128,9 +130,7 @@ class TestJSONExporter:
                     "duration": 1,
                     "result": "pass",
                     "log": "folder\nfile.txt",
-                    "retval": [
-                        "0"
-                    ],
+                    "retval": ["0"],
                 },
                 "status": "pass",
                 "test_fqn": "ls0",
@@ -147,9 +147,7 @@ class TestJSONExporter:
                     "duration": 1,
                     "result": "pass",
                     "log": "folder\nfile.txt",
-                    "retval": [
-                        "0"
-                    ],
+                    "retval": ["0"],
                 },
                 "status": "pass",
                 "test_fqn": "ls1",
@@ -166,9 +164,7 @@ class TestJSONExporter:
                     "duration": 1,
                     "result": "fail",
                     "log": "",
-                    "retval": [
-                        "1"
-                    ],
+                    "retval": ["1"],
                 },
                 "status": "fail",
                 "test_fqn": "ls2",
@@ -178,6 +174,7 @@ class TestJSONExporter:
                 "distribution_version": "15.3",
                 "distribution": "openSUSE-Leap",
                 "kernel": "5.17",
+                "cmdline": "security=selinux selinux=1 enforcing=1 ima_policy=tcb",
                 "arch": "x86_64",
                 "cpu": "x86_64",
                 "swap": "10 kB",

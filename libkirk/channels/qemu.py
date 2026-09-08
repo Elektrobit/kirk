@@ -1,53 +1,64 @@
 """
 .. module:: qemu
     :platform: Linux
-    :synopsis: module containing qemu SUT implementation
+    :synopsis: module containing qemu channel implementation
 
 .. moduleauthor:: Andrea Cervesato <andrea.cervesato@suse.com>
 """
-import os
-import re
-import time
-import signal
-import string
-import shutil
-import secrets
-import logging
+
 import asyncio
 import contextlib
+import logging
+import os
+import re
+import secrets
+import shutil
+import signal
+import string
+import time
+from typing import (
+    Any,
+    Dict,
+    Optional,
+)
+
+import libkirk.types
+from libkirk.com import (
+    ComChannel,
+    IOBuffer,
+)
+from libkirk.errors import (
+    CommunicationError,
+    KernelPanicError,
+)
 from libkirk.io import AsyncFile
-from libkirk.sut import SUT
-from libkirk.sut import IOBuffer
-from libkirk.sut import SUTError
-from libkirk.sut import KernelPanicError
 
 
-# pylint: disable=too-many-instance-attributes
-class QemuSUT(SUT):
+class QemuComChannel(ComChannel):
     """
-    Qemu SUT spawn a new VM using qemu and execute commands inside it.
-    This SUT implementation can be used to run commands inside
-    a protected, virtualized environment.
+    Qemu com channel spawn a new VM using qemu and execute commands inside it.
     """
+
+    _name = "qemu"
 
     def __init__(self) -> None:
         self._logger = logging.getLogger("kirk.qemu")
         self._comm_lock = asyncio.Lock()
         self._cmd_lock = asyncio.Lock()
         self._fetch_lock = asyncio.Lock()
-        self._tmpdir = None
+        self._tmpdir = ""
         self._proc = None
         self._stop = False
         self._logged_in = False
         self._last_pos = 0
         self._user = None
         self._password = None
-        self._prompt = None
+        self._prompt = "#"
         self._ram = None
         self._smp = None
         self._virtfs = None
         self._serial_type = None
-        self._qemu_cmd = None
+        self._qemu_cmd = ""
         self._opts = None
         self._image = None
         self._kernel = None
@@ -60,11 +71,12 @@ class QemuSUT(SUT):
         """
         Generate a random string of the given length.
         """
-        out = ''.join(secrets.choice(string.ascii_letters + string.digits)
-                      for _ in range(length))
+        out = "".join(
+            secrets.choice(string.ascii_letters + string.digits) for _ in range(length)
+        )
         return out
 
-    def _get_transport(self) -> str:
+    def _get_transport(self) -> tuple:
         """
         Return a couple of transport_dev and transport_file used by
         qemu instance for transport configuration.
@@ -104,7 +116,8 @@ class QemuSUT(SUT):
             params.append("-device virtserialport,chardev=transport")
         else:
             raise NotImplementedError(
-                f"Unsupported serial device type {self._serial_type}")
+                f"Unsupported serial device type {self._serial_type}"
+            )
 
         _, transport_file = self._get_transport()
         params.append(f"-chardev file,id=transport,path={transport_file}")
@@ -115,7 +128,8 @@ class QemuSUT(SUT):
                 f"path={self._virtfs},"
                 "mount_tag=host0,"
                 "security_model=mapped-xattr,"
-                "readonly=on")
+                "readonly=on"
+            )
 
         if self._image:
             params.append(f"-drive if=virtio,cache=unsafe,file={self._image}")
@@ -138,56 +152,55 @@ class QemuSUT(SUT):
 
         return cmd
 
-    def setup(self, **kwargs: dict) -> None:
-        self._logger.info("Initialize SUT")
+    def setup(self, **kwargs: Any) -> None:
+        self._logger.info("Initialize Qemu")
 
-        self._tmpdir = kwargs.get("tmpdir", None)
-        self._user = kwargs.get("user", None)
-        self._password = kwargs.get("password", None)
-        self._prompt = kwargs.get("prompt", "#")
-        self._image = kwargs.get("image", None)
-        self._initrd = kwargs.get("initrd", None)
-        self._kernel = kwargs.get("kernel", None)
-        self._ram = kwargs.get("ram", "2G")
-        self._smp = kwargs.get("smp", "2")
-        self._virtfs = kwargs.get("virtfs", None)
-        self._serial_type = kwargs.get("serial", "isa")
-        self._opts = kwargs.get("options", None)
+        self._tmpdir = libkirk.types.dict_item(kwargs, "tmpdir", str, None)
+        self._user = libkirk.types.dict_item(kwargs, "user", str, None)
+        self._password = libkirk.types.dict_item(kwargs, "password", str, None)
+        self._prompt = libkirk.types.dict_item(kwargs, "prompt", str, "#")
+        self._image = libkirk.types.dict_item(kwargs, "image", str, None)
+        self._initrd = libkirk.types.dict_item(kwargs, "initrd", str, None)
+        self._kernel = libkirk.types.dict_item(kwargs, "kernel", str, None)
+        self._ram = libkirk.types.dict_item(kwargs, "ram", str, "2G")
+        self._smp = libkirk.types.dict_item(kwargs, "smp", str, "2")
+        self._virtfs = libkirk.types.dict_item(kwargs, "virtfs", str, None)
+        self._serial_type = libkirk.types.dict_item(kwargs, "serial", str, "isa")
+        self._opts = libkirk.types.dict_item(kwargs, "options", str, None)
 
-        system = kwargs.get("system", "x86_64")
+        system = libkirk.types.dict_item(kwargs, "system", str, "x86_64")
         self._qemu_cmd = f"qemu-system-{system}"
 
         if not self._tmpdir or not os.path.isdir(self._tmpdir):
-            raise SUTError(
-                f"Temporary directory doesn't exist: {self._tmpdir}")
+            raise CommunicationError(
+                f"Temporary directory doesn't exist: {self._tmpdir}"
+            )
 
         if self._image and not os.path.isfile(self._image):
-            raise SUTError(
-                f"Image location doesn't exist: {self._image}")
+            raise CommunicationError(f"Image location doesn't exist: {self._image}")
 
         if self._kernel and not os.path.isfile(self._kernel):
-            raise SUTError(
-                f"Kernel location doesn't exist: {self._kernel}")
+            raise CommunicationError(f"Kernel location doesn't exist: {self._kernel}")
 
         if self._initrd and not os.path.isfile(self._initrd):
-            raise SUTError(
-                f"initrd location doesn't exist: {self._initrd}")
+            raise CommunicationError(f"initrd location doesn't exist: {self._initrd}")
 
         if not self._ram:
-            raise SUTError("RAM is not defined")
+            raise CommunicationError("RAM is not defined")
 
         if not self._smp:
-            raise SUTError("CPU is not defined")
+            raise CommunicationError("CPU is not defined")
 
         if self._virtfs and not os.path.isdir(self._virtfs):
-            raise SUTError(
-                f"Virtual FS directory doesn't exist: {self._virtfs}")
+            raise CommunicationError(
+                f"Virtual FS directory doesn't exist: {self._virtfs}"
+            )
 
         if self._serial_type not in ["isa", "virtio"]:
-            raise SUTError("Serial protocol must be isa or virtio")
+            raise CommunicationError("Serial protocol must be isa or virtio")
 
     @property
-    def config_help(self) -> dict:
+    def config_help(self) -> Dict[str, str]:
         return {
             "image": "qemu image location",
             "kernel": "kernel image location",
@@ -204,15 +217,10 @@ class QemuSUT(SUT):
         }
 
     @property
-    def name(self) -> str:
-        return "qemu"
-
-    @property
     def parallel_execution(self) -> bool:
         return False
 
-    @property
-    async def is_running(self) -> bool:
+    async def active(self) -> bool:
         if self._proc is None:
             return False
 
@@ -222,17 +230,18 @@ class QemuSUT(SUT):
         return self._proc.returncode is None
 
     async def ping(self) -> float:
-        if not await self.is_running:
-            raise SUTError("SUT is not running")
+        if not await self.active():
+            raise CommunicationError("Qemu is not running")
 
         _, _, exec_time = await self._exec("test .", None)
 
         return exec_time
 
-    async def _read_stdout(self, size: int, iobuffer: IOBuffer) -> str:
+    async def _read_stdout(self, size: int, iobuffer: Optional[IOBuffer] = None) -> str:
         """
         Read data from stdout.
         """
+        # pyrefly: ignore[missing-attribute]
         data = await self._proc.stdout.read(size)
         rdata = data.decode(encoding="utf-8", errors="replace")
 
@@ -246,21 +255,24 @@ class QemuSUT(SUT):
         """
         Write data on stdin.
         """
-        if not await self.is_running:
+        if not await self.active():
             return
 
         wdata = data.encode(encoding="utf-8")
         try:
+            # pyrefly: ignore[missing-attribute]
             self._proc.stdin.write(wdata)
         except BrokenPipeError as err:
             if not self._stop:
-                raise SUTError(err)
+                raise CommunicationError(err) from err
 
-    async def _wait_for(self, message: str, iobuffer: IOBuffer) -> str:
+    async def _wait_for(
+        self, message: str, iobuffer: Optional[IOBuffer] = None
+    ) -> Optional[str]:
         """
         Wait a string from stdout.
         """
-        if not await self.is_running:
+        if not await self.active():
             return None
 
         self._logger.info("Waiting for message: %s", repr(message))
@@ -272,12 +284,12 @@ class QemuSUT(SUT):
             if self._stop or self._panic:
                 break
 
-            if not await self.is_running:
+            if not await self.active():
                 break
 
             message_pos = stdout.find(message)
             if message_pos != -1:
-                self._last_read = stdout[message_pos + len(message):]
+                self._last_read = stdout[message_pos + len(message) :]
                 break
 
             data = await self._read_stdout(1024, iobuffer)
@@ -302,7 +314,7 @@ class QemuSUT(SUT):
 
     async def _wait_lockers(self) -> None:
         """
-        Wait for SUT lockers to be released.
+        Wait for Qemu lockers to be released.
         """
         async with self._comm_lock:
             pass
@@ -313,7 +325,7 @@ class QemuSUT(SUT):
         async with self._fetch_lock:
             pass
 
-    async def _exec(self, command: str, iobuffer: IOBuffer) -> set:
+    async def _exec(self, command: str, iobuffer: Optional[IOBuffer] = None) -> tuple:
         """
         Execute a command and return set(stdout, retcode, exec_time).
         """
@@ -329,7 +341,7 @@ class QemuSUT(SUT):
 
         t_start = time.time()
 
-        await self._write_stdin(f"{command}; echo $?-{code}\n")
+        await self._write_stdin(msg)
         stdout = await self._wait_for(code, iobuffer)
 
         exec_time = time.time() - t_start
@@ -339,12 +351,13 @@ class QemuSUT(SUT):
         if not self._stop:
             if stdout and stdout.rstrip():
                 match = re.search(f"(?P<retcode>\\d+)-{code}", stdout)
-                if not match and not self._stop:
-                    raise SUTError(
-                        f"Can't read return code from reply {repr(stdout)}")
+                if not match:
+                    raise CommunicationError(
+                        f"Can't read return code from reply {repr(stdout)}"
+                    )
 
                 # first character is '\n'
-                stdout = stdout[1:match.start()]
+                stdout = stdout[1 : match.start()]
 
                 try:
                     retcode = int(match.group("retcode"))
@@ -352,15 +365,13 @@ class QemuSUT(SUT):
                     pass
 
         self._logger.debug(
-            "stdout=%s, retcode=%d, exec_time=%d",
-            repr(stdout),
-            retcode,
-            exec_time)
+            "stdout=%s, retcode=%d, exec_time=%d", repr(stdout), retcode, exec_time
+        )
 
         return stdout, retcode, exec_time
 
-    async def stop(self, iobuffer: IOBuffer = None) -> None:
-        if not await self.is_running:
+    async def stop(self, iobuffer: Optional[IOBuffer] = None) -> None:
+        if not await self.active():
             return
 
         self._logger.info("Shutting down virtual machine")
@@ -373,7 +384,7 @@ class QemuSUT(SUT):
                     self._logger.info("Stop running command")
 
                     # send interrupt character (equivalent of CTRL+C)
-                    await self._write_stdin('\x03')
+                    await self._write_stdin("\x03")
                     await self._wait_lockers()
 
                 # logged in -> poweroff
@@ -382,32 +393,35 @@ class QemuSUT(SUT):
 
                     await self._write_stdin("poweroff; poweroff -f\n")
 
-                    while await self.is_running:
+                    while await self.active():
                         await self._read_stdout(1024, iobuffer)
 
+                    # pyrefly: ignore[missing-attribute]
                     await self._proc.wait()
         except asyncio.TimeoutError:
             pass
         finally:
             # still running -> stop process
-            if await self.is_running:
+            if await self.active():
                 self._logger.info("Killing virtual machine")
 
+                # pyrefly: ignore[missing-attribute]
                 self._proc.kill()
 
                 await self._wait_lockers()
+                # pyrefly: ignore[missing-attribute]
                 await self._proc.wait()
 
             self._stop = False
 
         self._logger.info("Qemu process ended")
 
-    async def communicate(self, iobuffer: IOBuffer = None) -> None:
+    async def communicate(self, iobuffer: Optional[IOBuffer] = None) -> None:
         if not shutil.which(self._qemu_cmd):
-            raise SUTError(f"Command not found: {self._qemu_cmd}")
+            raise CommunicationError(f"Command not found: {self._qemu_cmd}")
 
-        if await self.is_running:
-            raise SUTError("Virtual machine is already running")
+        if await self.active():
+            raise CommunicationError("Virtual machine is already running")
 
         error = None
 
@@ -419,12 +433,13 @@ class QemuSUT(SUT):
             self._logger.info("Starting virtual machine")
             self._logger.debug(cmd)
 
-            # pylint: disable=consider-using-with
+            # pyrefly: ignore[bad-assignment]
             self._proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT)
+                stderr=asyncio.subprocess.STDOUT,
+            )
 
             try:
                 if self._user:
@@ -448,18 +463,19 @@ class QemuSUT(SUT):
 
                 _, retcode, _ = await self._exec("export PS1=''", None)
                 if retcode != 0:
-                    raise SUTError("Can't setup prompt string")
+                    raise CommunicationError("Can't setup prompt string")
 
                 if self._virtfs:
                     _, retcode, _ = await self._exec(
-                        "mount -t 9p -o trans=virtio host0 /mnt", None)
+                        "mount -t 9p -o trans=virtio host0 /mnt", None
+                    )
                     if retcode != 0:
-                        raise SUTError("Failed to mount virtfs")
+                        raise CommunicationError("Failed to mount virtfs")
 
                 self._logged_in = True
 
                 self._logger.info("Virtual machine started")
-            except SUTError as err:
+            except CommunicationError as err:
                 error = err
 
         if not self._stop and error:
@@ -467,19 +483,20 @@ class QemuSUT(SUT):
             # something happened during commands execution
             await self.stop(iobuffer=iobuffer)
 
-            raise SUTError(error)
+            raise CommunicationError(error)
 
     async def run_command(
-            self,
-            command: str,
-            cwd: str = None,
-            env: dict = None,
-            iobuffer: IOBuffer = None) -> dict:
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        iobuffer: Optional[IOBuffer] = None,
+    ) -> Optional[Dict[str, Any]]:
         if not command:
             raise ValueError("command is empty")
 
-        if not await self.is_running:
-            raise SUTError("Virtual machine is not running")
+        if not await self.active():
+            raise CommunicationError("Virtual machine is not running")
 
         async with self._cmd_lock:
             self._logger.info("Running command: %s", command)
@@ -487,20 +504,19 @@ class QemuSUT(SUT):
             if cwd:
                 stdout, retcode, _ = await self._exec(f"cd {cwd}", None)
                 if retcode != 0:
-                    raise SUTError(
-                        f"Can't setup current working directory: {stdout}")
+                    raise CommunicationError(
+                        f"Can't setup current working directory: {stdout}"
+                    )
 
             if env:
                 for key, value in env.items():
-                    stdout, retcode, _ = await self._exec(
-                        f"export {key}={value}", None)
+                    stdout, retcode, _ = await self._exec(f"export {key}={value}", None)
                     if retcode != 0:
-                        raise SUTError(
-                            f"Can't setup env {key}={value}: {stdout}")
+                        raise CommunicationError(
+                            f"Can't setup env {key}={value}: {stdout}"
+                        )
 
-            stdout, retcode, exec_time = await self._exec(
-                f"{command}",
-                iobuffer)
+            stdout, retcode, exec_time = await self._exec(f"{command}", iobuffer)
 
             ret = {
                 "command": command,
@@ -517,41 +533,50 @@ class QemuSUT(SUT):
         if not target_path:
             raise ValueError("target path is empty")
 
-        if not await self.is_running:
-            raise SUTError("Virtual machine is not running")
+        if not await self.active():
+            raise CommunicationError("Virtual machine is not running")
 
         async with self._fetch_lock:
             self._logger.info("Downloading %s", target_path)
 
-            _, retcode, _ = await self._exec(f'test -f {target_path}', None)
+            _, retcode, _ = await self._exec(f"test -f {target_path}", None)
             if retcode != 0:
-                raise SUTError(f"'{target_path}' doesn't exist")
+                raise CommunicationError(f"'{target_path}' doesn't exist")
 
             transport_dev, transport_path = self._get_transport()
 
             stdout, retcode, _ = await self._exec(
-                f"cat {target_path} > {transport_dev}", None)
+                f"cat {target_path} > {transport_dev}", None
+            )
 
             if self._stop:
                 return bytes()
 
             if retcode not in [0, signal.SIGHUP, signal.SIGKILL]:
-                raise SUTError(
-                    f"Can't send file to {transport_dev}: {stdout}")
+                raise CommunicationError(
+                    f"Can't send file to {transport_dev}: {stdout}"
+                )
 
             # read back data and send it to the local file path
             file_size = os.path.getsize(transport_path)
 
-            retdata = bytes()
+            retdata = bytearray()
 
             async with AsyncFile(transport_path, "rb") as transport:
                 while not self._stop and self._last_pos < file_size:
                     await transport.seek(self._last_pos)
-                    data = await transport.read(4096)
-                    retdata += data
 
-                    self._last_pos = await transport.tell()
+                    data = await transport.read(4096)
+                    if data:
+                        # pyrefly: ignore[bad-argument-type]
+                        retdata.extend(data)
+
+                    pos = await transport.tell()
+                    if pos is None:
+                        raise CommunicationError("Can't read file position")
+
+                    self._last_pos = pos
 
             self._logger.info("File downloaded")
 
-            return retdata
+            return bytes(retdata)
